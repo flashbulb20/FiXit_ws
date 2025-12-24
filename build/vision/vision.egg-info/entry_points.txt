@@ -1,0 +1,3 @@
+[console_scripts]
+ros_yolo = vision.ros_yolo_finger:main
+
