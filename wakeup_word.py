@@ -1,9 +1,10 @@
+import os
 import numpy as np
 import openwakeword
 from openwakeword.model import Model
 from scipy.signal import resample
 from ament_index_python.packages import get_package_share_directory
-import MicController
+from voice_control import MicController
 
 MODEL_NAME = "hello_rokey_8332_32.tflite"
 
@@ -11,6 +12,8 @@ MODEL_NAME = "hello_rokey_8332_32.tflite"
 class WakeupWord:
     def __init__(self, buffer_size):
         openwakeword.utils.download_models()
+        package_share_dir = get_package_share_directory('voice_control')    # 여기서 각자 폴더 이름에 맞게 변경하세요
+        self.model_path = os.path.join(package_share_dir, 'models', MODEL_NAME)
         self.model = None
         self.model_name = MODEL_NAME.split(".", maxsplit=1)[0]
         self.stream = None
@@ -32,7 +35,7 @@ class WakeupWord:
         return False
 
     def set_stream(self, stream):
-        self.model = Model(wakeword_models=[MODEL_NAME])
+        self.model = Model(wakeword_models=[self.model_path])
         self.stream = stream
 
 
