@@ -1,7 +1,0 @@
-[console_scripts]
-close_grip = vision.close_grip:main
-go_home = vision.go_home:main
-open_grip = vision.open_grip:main
-ros_move = vision.ros_move:main
-ros_yolo = vision.ros_yolo_finger:main
-
