@@ -13,7 +13,7 @@ from collections import deque
 # AI 및 카메라 노드 임포트
 from ultralytics import YOLO
 import mediapipe as mp
-from realsense import ImgNode
+from .realsense import ImgNode
 
 import DR_init
 
@@ -28,7 +28,11 @@ class FingerTargetPublisher(Node):
         self.gripper2cam = np.load(npy_path)
         try:
             with open(json_path, 'r') as f:
-                self.fine_offset = np.array(json.load(f).get('translation', [0, 0, 0]))
+                data = json.load(f)
+                if 'poses' in data and len(data['poses']) > 0:
+                    self.fine_offset = np.array(data['poses'][0][:3]) 
+                else:
+                    self.fine_offset = np.array([0, 0, 0])
         except Exception as e:
             self.get_logger().warn(f"JSON load failed: {e}")
             self.fine_offset = np.zeros(3)
@@ -76,16 +80,19 @@ class FingerTargetPublisher(Node):
         return T
 
     def transform_to_base(self, camera_coords):
-        """카메라 좌표를 로봇 베이스 좌표로 변환"""
         from DSR_ROBOT2 import get_current_posx
         
-        coord = np.append(np.array(camera_coords), 1)  # Homogeneous
+        # 1. 카메라 좌표 (mm)
+        coord = np.append(np.array(camera_coords), 1)
+        
+        # 2. 로봇 현재 포즈 획득 및 변환 행렬 생성
         curr_pos = get_current_posx()[0]
-        
         base2gripper = self.get_robot_pose_matrix(*curr_pos)
-        base2cam = base2gripper @ self.gripper2cam
         
-        base_coord = (base2cam @ coord)[:3]
+        # 3. Base 좌표 계산 (Base = Base2Gripper * Gripper2Cam * P_camera)
+        base_coord = (base2gripper @ self.gripper2cam @ coord)[:3]
+        
+        # 4. JSON에서 가져온 추가 오프셋(fine_offset) 더하기
         return base_coord + self.fine_offset
 
     def main_loop(self):
