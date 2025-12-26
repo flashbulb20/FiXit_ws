@@ -7,6 +7,10 @@ log/
 **/move_images.py
 **/move_labels.py
 **/label_remapping.py
+**/open_grip.py
+**/close_grip.py
+**/go_home.py
+**/T_gripper2camera.npy
 
 **/calibrate_data.json
 

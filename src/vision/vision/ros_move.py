@@ -3,163 +3,203 @@ import mediapipe as mp
 import numpy as np
 import pyrealsense2 as rs
 from ultralytics import YOLO
+from scipy.spatial.transform import Rotation
+import json
+import os
+import time
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Pose  # Pose 메시지 추가
 import DR_init
-import time
-import os
 
-# 전역 변수로 선언 (main에서 임포트 후 할당)
-posx = posj = movel = movej = get_current_posx = get_robot_state = set_tool = set_tcp = None
-
-# 로봇 설정
+# ==========================================
+# 로봇 설정 (DSR-01, M0609)
+# ==========================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
-ROBOT_TOOL = "Tool Weight"
-ROBOT_TCP = "GripperDA_v1"
-VEL_APPROACH = 100
-ACC = 100
+VEL_APPROACH, ACC = 80, 80
 
-class DoosanFingerPointingController(Node):
-    def __init__(self, yolo_model):
-        super().__init__('doosan_finger_pointing')
+class FinalEyeInHandController(Node):
+    def __init__(self, yolo_model, npy_path, json_path):
+        super().__init__('final_eye_in_hand_controller')
         
-        # 1. 토픽 구독 설정 (/vision/target_pose)
-        self.subscription = self.create_subscription(
-            Pose,
-            '/vision/target_pose',
-            self.target_pose_callback,
-            10
-        )
-        self.get_logger().info('Target-pose subscription complete')
-
-        # MediaPipe & YOLO & RealSense 초기화 (기존 코드와 동일)
-        self.init_sensors(yolo_model)
+        # 1. 파일 로드 (둘 다 포함)
+        self.load_files(npy_path, json_path)
         
-        # 로봇 초기화
-        self.initialize_doosan_robot()
-        
-        # 캘리브레이션 및 설정
-        self.camera_offset = np.array([500.0, 0.0, 300.0])
-        self.last_move_time = time.time()
-        self.move_cooldown = 3.0
-        self.safe_height = 150.0
-
-    def target_pose_callback(self, msg):
-        """토픽을 통해 받은 좌표로 로봇 이동"""
-        # 메시지에서 x, y, z 추출 (단위: mm 가정)
-        # 만약 토픽 데이터가 미터(m) 단위라면 1000을 곱해야 합니다.
-        target_3d = np.array([msg.position.x, msg.position.y, msg.position.z])
-        
-        self.get_logger().info(f'Received Topic Pose: x={target_3d[0]:.1f}, y={target_3d[1]:.1f}, z={target_3d[2]:.1f}')
-        
-        # 기존 이동 함수 호출 (Label은 'Topic_Target'으로 지정)
-        self.move_robot_to_target(target_3d, "Topic_Target")
-
-    def init_sensors(self, yolo_model):
-        """센서 및 AI 모델 초기화 부분 분리"""
+        # 2. AI 모델 초기화
         self.mp_hands = mp.solutions.hands
-        self.mp_draw = mp.solutions.drawing_utils
-        self.hands = self.mp_hands.Hands(min_detection_confidence=0.7)
+        self.hands = self.mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
         self.yolo = YOLO(yolo_model)
         
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        self.config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        profile = self.pipeline.start(self.config)
+        # 3. 카메라 초기화
+        self.init_camera()
         
-        depth_sensor = profile.get_device().first_depth_sensor()
-        self.depth_scale = depth_sensor.get_depth_scale()
-        intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
-        self.fx, self.fy, self.cx, self.cy = intrinsics.fx, intrinsics.fy, intrinsics.ppx, intrinsics.ppy
+        # 4. 로봇 초기화 및 상태 변수
+        self.initialize_robot()
+        self.last_move_time = time.time()
+        self.move_cooldown = 5.0
+        self.safe_height = 100.0  # mm (목표물 위쪽 대기 높이)
+
+    def load_files(self, npy_path, json_path):
+        """npy(행렬)와 json(오프셋)을 모두 로드"""
+        # (1) npy 로드: Gripper to Camera 변환 행렬
+        try:
+            self.gripper2cam = np.load(npy_path)
+            self.get_logger().info(f"Loaded Matrix: {npy_path}")
+        except Exception as e:
+            self.get_logger().error(f"NPY missing: {e}")
+            exit()
+
+        # (2) json 로드: 미세 보정용 Translation Offset
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+                self.fine_offset = np.array(data.get('translation', [0.0, 0.0, 0.0]))
+            self.get_logger().info(f"Loaded Offset: {self.fine_offset}")
+        except Exception as e:
+            self.get_logger().warn(f"JSON missing or error: {e}. Using zero offset.")
+            self.fine_offset = np.array([0.0, 0.0, 0.0])
+
+    def init_camera(self):
+        self.pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        profile = self.pipeline.start(config)
+        
+        intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        self.intrinsics = {'fx': intr.fx, 'fy': intr.fy, 'ppx': intr.ppx, 'ppy': intr.ppy}
+        self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
         self.align = rs.align(rs.stream.color)
 
-    def initialize_doosan_robot(self):
+    def initialize_robot(self):
         try:
-            set_tool(ROBOT_TOOL)
-            set_tcp(ROBOT_TCP)
+            # 시작 시 홈 포지션 이동
             movej(posj([0, 0, 90, 0, 90, 0]), vel=VEL_APPROACH, acc=ACC)
-            self.get_logger().info('Robot Ready')
         except Exception as e:
-            self.get_logger().error(f'Robot init failed: {e}')
+            self.get_logger().error(f"Robot connection failed: {e}")
 
-    # ... [pixel_to_3d, camera_to_robot_frame, move_robot_to_target 등 기존 함수 유지] ...
-    # (중복 방지를 위해 상세 로직은 기존 소스코드와 동일하게 유지한다고 가정합니다)
+    def get_robot_pose_matrix(self, x, y, z, rx, ry, rz):
+        """로봇 포즈(posx)를 4x4 행렬로 변환"""
+        R = Rotation.from_euler("ZYZ", [rx, ry, rz], degrees=True).as_matrix()
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = [x, y, z]
+        return T
 
-    def move_robot_to_target(self, target_3d, object_label):
-        """기존 코드의 이동 로직 그대로 사용"""
-        current_time = time.time()
-        if current_time - self.last_move_time < self.move_cooldown:
-            return False
+    def transform_to_base(self, camera_coords):
+        """npy 행렬 연산 + json 미세 보정 결합"""
+        # 1. 카메라 3D 점 -> 동차 좌표
+        coord = np.append(np.array(camera_coords), 1) 
         
-        robot_pos = self.camera_to_robot_frame(target_3d)
+        # 2. 현재 로봇 포즈 행렬 (Base -> Gripper)
+        curr_pos = get_current_posx()[0]
+        base2gripper = self.get_robot_pose_matrix(*curr_pos)
+        
+        # 3. 전체 행렬 연산 (Base -> Gripper -> Camera)
+        base2cam = base2gripper @ self.gripper2cam
+        target_in_base = np.dot(base2cam, coord)[:3]
+        
+        # 4. JSON의 미세 보정값 적용 (최종 좌표)
+        final_target = target_in_base + self.fine_offset
+        return final_target
+
+    def pixel_to_3d(self, u, v, depth_image):
+        z = depth_image[v, u] * self.depth_scale * 1000.0 # mm 단위
+        if z == 0: return None
+        x = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
+        y = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
+        return np.array([x, y, z])
+
+    def move_robot_sequence(self, camera_pos):
+        if time.time() - self.last_move_time < self.move_cooldown:
+            return
+
+        # 1. 최종 베이스 좌표 계산
+        robot_coord = self.transform_to_base(camera_pos)
         
         try:
-            target_pose = posx([robot_pos[0], robot_pos[1], robot_pos[2], -180.0, 0.0, 0.0])
-            safe_pose = posx([robot_pos[0], robot_pos[1], robot_pos[2] + self.safe_height, -180.0, 0.0, 0.0])
-            
+            curr_pos = get_current_posx()[0]
+            # 안전 높이 및 목표 위치 설정
+            safe_pose = posx([robot_coord[0], robot_coord[1], robot_coord[2] + self.safe_height, curr_pos[3], curr_pos[4], curr_pos[5]])
+            target_pose = posx([robot_coord[0], robot_coord[1], robot_coord[2], curr_pos[3], curr_pos[4], curr_pos[5]])
+
+            self.get_logger().info(f"Moving to Base: {robot_coord.round(2)}")
             movel(safe_pose, vel=VEL_APPROACH, acc=ACC)
             movel(target_pose, vel=VEL_APPROACH, acc=ACC)
-            time.sleep(1.0)
+            wait(1.5)
             movel(safe_pose, vel=VEL_APPROACH, acc=ACC)
             
-            self.last_move_time = current_time
-            return True
+            self.last_move_time = time.time()
         except Exception as e:
-            self.get_logger().error(f'Move failed: {e}')
-            return False
-
-    def camera_to_robot_frame(self, camera_pos):
-        # 기존 좌표 변환 로직
-        robot_x = self.camera_offset[0] + camera_pos[2]
-        robot_y = self.camera_offset[1] - camera_pos[0]
-        robot_z = self.camera_offset[2] - camera_pos[1]
-        return np.array([robot_x, robot_y, robot_z])
+            self.get_logger().error(f"Robot control error: {e}")
 
     def run(self):
-        """메인 루프: 이미지 처리와 ROS2 스핀 병행"""
         try:
             while rclpy.ok():
                 frames = self.pipeline.wait_for_frames()
-                # ... [영상 처리 및 손가락 포인팅 로직 유지] ...
-                
-                # ROS2 콜백 처리를 위해 spin_once 실행
+                aligned = self.align.process(frames)
+                color_img = np.asanyarray(aligned.get_color_frame().get_data())
+                depth_img = np.asanyarray(aligned.get_depth_frame().get_data())
+
+                # 1. YOLO 객체 검출
+                results = self.yolo(color_img, conf=0.6, verbose=False)
+                detections = []
+                for box in results[0].boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                    detections.append({'bbox': (x1, y1, x2, y2)})
+
+                # 2. 손가락 지시(Pointing) 확인
+                res_hands = self.hands.process(cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB))
+                if res_hands.multi_hand_landmarks:
+                    lms = res_hands.multi_hand_landmarks[0]
+                    p_tip = self.pixel_to_3d(int(lms.landmark[8].x*640), int(lms.landmark[8].y*480), depth_img)
+                    p_wrist = self.pixel_to_3d(int(lms.landmark[0].x*640), int(lms.landmark[0].y*480), depth_img)
+
+                    if p_tip is not None and p_wrist is not None:
+                        ray = (p_tip - p_wrist) / np.linalg.norm(p_tip - p_wrist)
+                        
+                        for det in detections:
+                            u, v = (det['bbox'][0] + det['bbox'][2]) // 2, (det['bbox'][1] + det['bbox'][3]) // 2
+                            obj_3d = self.pixel_to_3d(u, v, depth_img)
+                            
+                            if obj_3d is not None:
+                                vec_to_obj = obj_3d - p_tip
+                                dist = np.linalg.norm(np.cross(vec_to_obj, ray))
+                                
+                                # 지시 방향 10cm 이내면 타겟 확정
+                                if dist < 100.0:
+                                    cv2.rectangle(color_img, (det['bbox'][0], det['bbox'][1]), (det['bbox'][2], det['bbox'][3]), (0, 255, 0), 2)
+                                    self.move_robot_sequence(obj_3d)
+                                    break
+
+                cv2.imshow("Final Eye-in-Hand Control", color_img)
+                if cv2.waitKey(1) & 0xFF == 27: break
                 rclpy.spin_once(self, timeout_sec=0.001)
         finally:
             self.pipeline.stop()
             cv2.destroyAllWindows()
 
 def main(args=None):
-    global posx, posj, movel, movej, get_current_posx, get_robot_state, set_tool, set_tcp
-    
+    global posx, posj, movel, movej, get_current_posx, wait
     rclpy.init(args=args)
     
-    # 1. 노드 먼저 생성
-    node = rclpy.create_node("doosan_finger_control", namespace=ROBOT_ID)
+    node = rclpy.create_node("pointing_controller", namespace=ROBOT_ID)
     DR_init.__dsr__node = node
-    DR_init.__dsr__id = ROBOT_ID
-    DR_init.__dsr__model = ROBOT_MODEL
     
-    # 2. 노드 생성 후 로봇 라이브러리 임포트 (오류 방지 핵심)
-    from DSR_ROBOT2 import (
-        posx, posj, movel, movej, 
-        get_current_posx, get_robot_state,
-        set_tool, set_tcp
-    )
-    
-    # 모델 경로 설정
-    model_path = os.path.expanduser("~/FiXit_ws/src/vision/vision/third_result.pt")
-    
-    try:
-        controller = DoosanFingerPointingController(model_path)
-        controller.run()
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        rclpy.shutdown()
+    # DSR 라이브러리 임포트
+    from DSR_ROBOT2 import posx, posj, movel, movej, get_current_posx, wait
+    from DR_common2 import posx, posj
+
+    # 경로 설정
+    base_p = os.path.expanduser("~/FiXit_ws/src/vision/vision")
+    model_p = os.path.join(base_p, "third_result.pt")
+    npy_p = os.path.join(base_p, "T_gripper2camera.npy")
+    json_p = os.path.join(base_p, "calibrate_data.json")
+
+    controller = FinalEyeInHandController(model_p, npy_p, json_p)
+    controller.run()
+    rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
