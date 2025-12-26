@@ -32,7 +32,7 @@ def move_corresponding_txt_files(source_dir_with_jpg, source_dir_with_txt, targe
 
 def main():
     HOME_DIR = os.path.expanduser("~")
-    dst_dir = "second_data"  # 실행 전에 확인!!!
+    dst_dir = "third_data"  # 실행 전에 확인!!!
     source_dir_with_jpg = os.path.join(HOME_DIR, f'{dst_dir}/train/images')
     source_dir_with_txt = os.path.join(HOME_DIR, 'labels')
     target_dir = os.path.join(HOME_DIR, f'{dst_dir}/train/labels')

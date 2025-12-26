@@ -18,21 +18,21 @@ class FingerPointingDetector(Node):
         # 1. 가리킨 물체의 3D 좌표 발행 (PointStamped)
         self.point_pub = self.create_publisher(
             PointStamped, 
-            '/pointed_object/position', 
+            '/vision/target_pose', 
             10
         )
         
         # 2. 가리킨 물체의 라벨 발행 (String)
         self.label_pub = self.create_publisher(
             String,
-            '/pointed_object/label',
+            '/vision/label',
             10
         )
         
         # 3. 전체 detection 정보 발행 (커스텀 메시지 형태로)
         self.detection_pub = self.create_publisher(
             String,
-            '/pointed_object/info',
+            '/vision/info',
             10
         )
         
@@ -277,6 +277,7 @@ class FingerPointingDetector(Node):
         results = self.yolo(
             image, 
             conf=conf_threshold,  # confidence threshold 높임
+            classes=[0, 1, 2, 3], # others 제외
             iou=iou_threshold,    # NMS IOU threshold
             verbose=False,
             imgsz=640  # 이미지 크기 명시
@@ -470,7 +471,7 @@ def main(args=None):
     workspace_name = "FiXit_ws"
     pkg_name = "vision"
     pkg_path = os.path.join(HOME_DIR, workspace_name, f"src/{pkg_name}/{pkg_name}")
-    pt_filename = "second_result.pt"
+    pt_filename = "third_result.pt"
     
     model_path = os.path.join(pkg_path, pt_filename)
     

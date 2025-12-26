@@ -4,7 +4,7 @@ import time
 import random
 
 HOME_DIR = os.path.expanduser("~")
-dst_dir = "second_data"  # 실행 전에 확인!!!
+dst_dir = "third_data"  # 실행 전에 확인!!!
 
 def split_files(source_directory, train_dir=os.path.join(HOME_DIR, dst_dir, "train/images"),
                 validation_dir=os.path.join(HOME_DIR, dst_dir, "valid/images"),

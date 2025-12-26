@@ -24,7 +24,11 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            "ros_yolo = vision.ros_yolo_finger:main"
+            "ros_yolo = vision.ros_yolo_finger:main",
+            "ros_move = vision.ros_move:main",
+            "open_grip = vision.open_grip:main",
+            "close_grip = vision.close_grip:main",
+            "go_home = vision.go_home:main"
         ],
     },
 )

@@ -7,7 +7,7 @@ DEVICE_NUMBER = 6
 def main(args=None):
     # 데이터 저장 경로 설정
     HOME_DIR = os.path.expanduser("~")
-    source_path = os.path.join(HOME_DIR, "data")
+    source_path = os.path.join(HOME_DIR, "calibration")
     os.makedirs(source_path, exist_ok=True)
     # 카메라 연결
     print(f"현재 선택된 device number는 {DEVICE_NUMBER}입니다.")
@@ -26,13 +26,13 @@ def main(args=None):
 
         # 사진 캡쳐
         if cv2.waitKey(1) & 0xFF == ord("c"):
-            file_name = f"tools_{count}.jpg"
+            file_name = f"cali_data_{count}.jpg"
             count += 1
             # 현재 위치 기반 이미지 저장
             cv2.imwrite(f"{source_path}/{file_name}", frame)
             print(f"save img to {source_path}/{file_name}")
         # OpenCV 종료
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        if cv2.waitKey(1) & 0xFF == 27:
             break
 
     cap.release()

@@ -13,10 +13,15 @@ test/test_copyright.py
 test/test_flake8.py
 test/test_pep257.py
 vision/__init__.py
+vision/close_grip.py
 vision/create_data_dirs.py
 vision/data_recording.py
 vision/finger_detector.py
+vision/go_home.py
+vision/label_remapping.py
 vision/move_images.py
 vision/move_labels.py
+vision/open_grip.py
+vision/ros_move.py
 vision/ros_yolo_finger.py
 vision/yolo_finger.py
