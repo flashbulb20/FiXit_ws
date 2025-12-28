@@ -7,13 +7,13 @@ from scipy.spatial.transform import Rotation
 import numpy as np
 import json
 import os
-import time
 from collections import deque
+from rclpy.executors import MultiThreadedExecutor
 
 # AI 및 카메라 노드 임포트
 from ultralytics import YOLO
 import mediapipe as mp
-from .realsense import ImgNode
+from vision.realsense import ImgNode
 
 import DR_init
 
@@ -23,6 +23,7 @@ ROBOT_ID = "dsr01"
 class FingerTargetPublisher(Node):
     def __init__(self, yolo_model, npy_path, json_path):
         super().__init__('finger_target_publisher')
+        print("=== FingerTargetPublisher 초기화 시작 ===")
 
         # 1. 캘리브레이션 및 오프셋 로드
         self.gripper2cam = np.load(npy_path)
@@ -37,11 +38,9 @@ class FingerTargetPublisher(Node):
             self.get_logger().warn(f"JSON load failed: {e}")
             self.fine_offset = np.zeros(3)
 
-        # 2. ImgNode 초기화 및 카메라 파라미터 획득
+        # 2. ImgNode 초기화 (멀티스레드에서 동작하므로 spin_once 제거)
         self.img_node = ImgNode()
-        rclpy.spin_once(self.img_node, timeout_sec=1.0)
         self.intrinsics = self.img_node.get_camera_intrinsic()
-        # ImgNode에서 정의된 depth_scale을 가져옵니다.
         self.depth_scale = self.img_node.depth_scale if hasattr(self.img_node, 'depth_scale') else 0.001
 
         # 3. AI 모델 초기화
@@ -53,26 +52,23 @@ class FingerTargetPublisher(Node):
             min_tracking_confidence=0.5
         )
 
-        # 4. 발행 설정 및 상태 관리
+        # 4. 발행 설정
         pose_qos = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         self.pose_pub = self.create_publisher(PoseStamped, '/vision/target_pose', pose_qos)
         
-        self.hit_buffer = deque(maxlen=5) # 5회 연속 적중 확인용
+        self.hit_buffer = deque(maxlen=5)
         self.published = False
         
-        # 5. 메인 루프 타이머 (30fps)
-        self.create_timer(1 / 30.0, self.main_loop)
-        self.get_logger().info("Finger-Object Tracker with ImgNode Started")
+        # 5. 타이머 설정 (루프 속도를 15fps 정도로 조절하여 연산 부하 감소)
+        self.create_timer(1 / 15.0, self.main_loop)
+        print("=== FingerTargetPublisher 초기화 완료 ===")
 
     def get_camera_pos(self, u, v, z):
-        """픽셀 좌표와 Depth를 3D 카메라 좌표로 변환"""
         camera_x = (u - self.intrinsics["ppx"]) * z / self.intrinsics["fx"]
         camera_y = (v - self.intrinsics["ppy"]) * z / self.intrinsics["fy"]
-        camera_z = z
-        return np.array([camera_x, camera_y, camera_z])
+        return np.array([camera_x, camera_y, z])
 
     def get_robot_pose_matrix(self, x, y, z, rx, ry, rz):
-        """로봇 포즈를 변환 행렬로 변환"""
         R = Rotation.from_euler("ZYZ", [rx, ry, rz], degrees=True).as_matrix()
         T = np.eye(4)
         T[:3, :3] = R
@@ -81,44 +77,37 @@ class FingerTargetPublisher(Node):
 
     def transform_to_base(self, camera_coords):
         from DSR_ROBOT2 import get_current_posx
-        
-        # 1. 카메라 좌표 (mm)
         coord = np.append(np.array(camera_coords), 1)
-        
-        # 2. 로봇 현재 포즈 획득 및 변환 행렬 생성
         curr_pos = get_current_posx()[0]
         base2gripper = self.get_robot_pose_matrix(*curr_pos)
-        
-        # 3. Base 좌표 계산 (Base = Base2Gripper * Gripper2Cam * P_camera)
         base_coord = (base2gripper @ self.gripper2cam @ coord)[:3]
-        
-        # 4. JSON에서 가져온 추가 오프셋(fine_offset) 더하기
         return base_coord + self.fine_offset
 
     def main_loop(self):
-        # 1. ImgNode로부터 최신 프레임 획득
-        rclpy.spin_once(self.img_node, timeout_sec=0.01)
+        # 1. 프레임 획득 (이미지 노드가 별도 스레드에서 돌고 있으므로 바로 가져옴)
         color_img = self.img_node.get_color_frame()
         depth_img = self.img_node.get_depth_frame()
 
+        if self.intrinsics is None:
+            self.get_logger().warn("카메라 파라미터(Intrinsics) 수신 대기 중...", once=True)
+            return
+        
         if color_img is None or depth_img is None:
+            print("이미지 수신 대기 중...")
             return
 
-        # 2. YOLO 객체 탐지
+        print("=== 루프 동작 중 (이미지 획득 성공) ===")
+
+        # 2. YOLO 및 MediaPipe 처리
         results = self.yolo(color_img, conf=0.6, verbose=False)
         detections = [{"bbox": box.xyxy[0].cpu().numpy().astype(int)} for box in results[0].boxes]
-
-        # 3. MediaPipe 손가락 인식
         res = self.hands.process(cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB))
         
         if res.multi_hand_landmarks:
             lms = res.multi_hand_landmarks[0]
-            
-            # 검지 끝(8)과 손목(0) 좌표 추출
             u_tip, v_tip = int(lms.landmark[8].x * 640), int(lms.landmark[8].y * 480)
             u_wrist, v_wrist = int(lms.landmark[0].x * 640), int(lms.landmark[0].y * 480)
 
-            # depth 값 획득 및 3D 변환 (mm 단위)
             z_tip = depth_img[v_tip, u_tip] * self.depth_scale * 1000.0
             z_wrist = depth_img[v_wrist, u_wrist] * self.depth_scale * 1000.0
             
@@ -137,7 +126,6 @@ class FingerTargetPublisher(Node):
                         v_vec = p_obj - p_tip
                         proj = np.dot(v_vec, ray)
                         
-                        # 가리키는 방향에 있고 거리가 30mm 이내인 경우
                         if proj > 0 and np.linalg.norm(v_vec - proj * ray) < 30.0:
                             self.hit_buffer.append(True)
                             if len(self.hit_buffer) >= 5 and not self.published:
@@ -155,32 +143,35 @@ class FingerTargetPublisher(Node):
         msg.header.frame_id = "base"
         msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = map(float, pos)
         self.pose_pub.publish(msg)
-        self.get_logger().info(f"Published Target Base Coord: {pos.round(2)}")
+        print(f"=== 좌표 발행 완료: {pos} ===")
 
 def main(args=None):
     rclpy.init(args=args)
     
-    # 1. 로봇 노드 초기화 및 라이브러리 연동 준비
+    # 로봇 노드 초기화
     node = rclpy.create_node("vision_interface_node", namespace=ROBOT_ID)
     DR_init.__dsr__node = node
     
-    # 2. DSR_ROBOT2 임포트 (DR_init 설정 후 수행)
     try:
         from DSR_ROBOT2 import get_current_posx
-    except ImportError as e:
-        print(f"Error importing DSR_ROBOT2: {e}")
+    except ImportError:
         return
 
-    # 3. 파일 경로 설정 및 노드 실행
     path = os.path.expanduser("~/FiXit_ws/src/vision/vision")
     vision_node = FingerTargetPublisher(
         os.path.join(path, "third_result.pt"),
         os.path.join(path, "T_gripper2camera.npy"),
         os.path.join(path, "calibrate_data.json")
     )
-    
+
+    # MultiThreadedExecutor 설정
+    executor = MultiThreadedExecutor()
+    executor.add_node(vision_node)
+    executor.add_node(vision_node.img_node)
+
+    print("=== MultiThreadedExecutor 시작 ===")
     try:
-        rclpy.spin(vision_node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

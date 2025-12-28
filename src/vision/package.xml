@@ -2,10 +2,18 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>vision</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="hyunj@todo.todo">hyunj</maintainer>
-  <license>TODO: License declaration</license>
+  <version>0.0.1</version>
+  <description>Vision package for robot manipulation with YOLO and MediaPipe</description>
+  <maintainer email="your_email@example.com">Your Name</maintainer>
+  <license>Apache License 2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
