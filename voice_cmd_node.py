@@ -9,9 +9,9 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from voice_control.MicController import MicController, MicConfig
-from voice_control.wakeup_word import WakeupWord
-from voice_control.STT import STT
+from voice_control.MicController import MicController, MicConfig      # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
+from voice_control.wakeup_word import WakeupWord                      # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
+from voice_control.STT import STT                                     # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
 
 load_dotenv(dotenv_path=os.path.join(".env"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -39,25 +39,27 @@ class VisionPointingVoiceNode(Node):
         [연속 대화 규칙]
         1. 당신은 현재 '연속 대화 모드'에 있습니다. 호출어 없이도 사용자의 명령을 계속 처리합니다.
         2. 사용자가 "대기"라는 단어가 인식되면 payload를 'standby'로 설정하세요.
+        3. 토픽이 발행되는 조건이 아닌 일반 대화나 모호한 명령일 때는 반드시 'payload'를 'NONE'으로 설정하고, 'msg'를 'SILENCE'라고만 적으세요.
 
         [토픽 생성 규칙]
         1. 손으로 가리키는 뉘앙스가 있다면 무조건 'track_hand'를 출력하세요.
         2. 이 모델은 전자기기 수리 보조기능을 담당합니다. 사용자의 모든 언어를 전자기기 수리와 관련된 언어로 인식하세요.
         3. 작업도구에는 pcb, 플럭스(flux), 전선, 돋보기, 납 흡입기, 인두기가 있습니다.
-        4. 종료 요청: 사용자가 작업을 끝내려 하면 'program_finish'를 출력하세요.
-        5. 기타: 로봇이 수행할 수 없는 일반 대화나 모호한 말은 'NONE'으로 처리하세요.
-        6. 명확한 작업도구가 인식되지 않으면 문맥과 일치하는 명사를 제안하세요
-        7. 작업 보조:
+        4. 작업도구 종류의 리스트를 알려달라거나 어떤 도구들이 있는지 알려달라는 명령이 들어오면 'tool_list'를 출력하세요
+        5. 종료 요청: 사용자가 작업을 끝내려 하면 'program_finish'를 출력하세요.
+        6. 기타: 로봇이 수행할 수 없는 일반 대화나 모호한 말은 'NONE'으로 처리하세요.
+        7. 명확한 작업도구가 인식되지 않으면 문맥과 일치하는 명사를 제안하세요
+        8. 작업 보조:
             - "잡아줘", "고정해" -> hold
             - "위로/아래로/왼쪽/오른쪽" -> nudge_up, nudge_down, nudge_left, nudge_right
-        8. 물체 이름 매핑: 사용자가 부르는 용어가 달라도 표준 영어 단어를 사용하여 'fetch_단어' 형태로 만드세요.
-        9. 사용자가 사용하는 언어를 자동으로 감지하세요.
-        10. 응답 메시지('msg')는 반드시 사용자가 말한 것과 동일한 언어로 작성하세요.
+        9. 물체 이름 매핑: 사용자가 부르는 용어가 달라도 표준 영어 단어를 사용하여 'fetch_단어' 형태로 만드세요.
+        10. 사용자가 사용하는 언어를 자동으로 감지하세요.
+        11. 응답 메시지('msg')는 반드시 사용자가 말한 것과 동일한 언어로 작성하세요.
 
         응답은 반드시 JSON 형식이어야 합니다: {"payload": "생성된_토픽", "msg": "로봇의 응답 멘트"}
         """
         
-        self.get_logger().info("단어 분할 발행 방식의 지능형 노드가 시작되었습니다.")
+        self.get_logger().info("작업을 시작합니다.")
 
     def publish_cmd(self, payload):
         """명령 토픽 발행 (발행 후 다시 인식 가능 상태로 전환 준비)"""
@@ -65,7 +67,7 @@ class VisionPointingVoiceNode(Node):
             msg = String()
             msg.data = payload
             self.publisher_.publish(msg)
-            self.get_logger().info(f'토픽: {msg.data}')
+            # self.get_logger().info(f'토픽: {msg.data}')
 
     def tts_callback(self, msg):
         """비전 노드 피드백 수신 (예: FOUND:iron, NOT_FOUND:magnifier)"""
@@ -123,6 +125,13 @@ class VisionPointingVoiceNode(Node):
             
             if payload == "standby":
                 return "standby"
+            
+            if payload == "NONE":
+                self.get_logger().info("지원하지 않는 명령입니다. 침묵합니다.")
+                return "RETRY" # TTS 호출 없이 바로 리턴
+            
+            if payload == "NONE":
+                return "NONE"
 
             self.display_and_speak(answer_msg)
             self.publish_cmd(payload)
