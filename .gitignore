@@ -20,4 +20,5 @@ log/
 **/ros_yolo.py
 **/yolo_finger.py
 
+**/.env
 **/test.py
