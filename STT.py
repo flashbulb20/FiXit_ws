@@ -9,7 +9,7 @@ from ament_index_python.packages import get_package_share_directory
 from dotenv import load_dotenv
 
 try:
-    package_share_dir = get_package_share_directory('voice_control')  ## 여기서 각자 폴더의 이름에 맞게 변경하세요
+    package_share_dir = get_package_share_directory('voice_control')  ## 여기서 각자 src폴더의 이름에 맞게 변경하세요
     env_path = os.path.join(package_share_dir, '.env')
     load_dotenv(dotenv_path=env_path)
 except Exception:
