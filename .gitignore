@@ -11,8 +11,3 @@ log/
 **/close_grip.py
 **/go_home.py
 **/test.py
-
-**/T_gripper2camera.npy
-**/calibrate_data.json
-
-*.pt
