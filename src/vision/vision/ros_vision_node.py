@@ -13,7 +13,7 @@ import cv2
 from vision.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
 
 
-class DummyImgNode:    
+class DummyImgNode:
     def __init__(self, use_webcam=True, camera_id=0):
         self.intrinsics = {
             'fx': 600.0, 'fy': 600.0,
@@ -73,24 +73,25 @@ class DummyRobot:
 class VisionNode(Node):
     """Vision ROS2 노드"""
     
-    def __init__(self, model_path, npy_path, json_path, img_node):
+    def __init__(self, model_path, npy_path, img_node):
         super().__init__('vision_node')
         
         # 카메라
         self.img_node = img_node
         self.intrinsics = self.img_node.get_camera_intrinsic()
-        self.depth_scale = self.img_node.depth_scale
+        
+        # RealSense depth는 이미 mm 단위 (depth_scale 사용 안 함)
+        self.depth_scale = 1.0  # 스케일 적용 안 함
+        self.get_logger().info(f"✓ depth_scale: {self.depth_scale} (RealSense는 이미 mm 단위)")
         
         # CV 모듈
         self.object_detector = ObjectDetector(model_path, conf_threshold=0.6)
         self.hand_detector = HandDetector()
         self.pointing_analyzer = PointingAnalyzer(distance_threshold=50.0)
         
-        # 캘리브레이션
+        # 캘리브레이션 (NPY만 사용)
         self.gripper2cam = np.load(npy_path)
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-            self.fine_offset = np.array(data['poses'][0][:3]) if 'poses' in data else np.zeros(3)
+        self.get_logger().info(f"✓ 캘리브레이션 로드: {npy_path}")
         
         # Publisher
         qos = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT)
@@ -119,7 +120,7 @@ class VisionNode(Node):
         curr_pose = get_current_posx()[0]
         base2gripper = self.get_robot_pose_matrix(*curr_pose)
         base_coord = (base2gripper @ self.gripper2cam @ coord)[:3]
-        return base_coord + self.fine_offset
+        return base_coord
     
     def loop(self):
         # 프레임 획득
@@ -156,7 +157,7 @@ class VisionNode(Node):
             self.hit_buffer.append(pointed.class_name)
             
             # 5회 연속 같은 객체
-            if (len(self.hit_buffer) >= 2 and 
+            if (len(self.hit_buffer) >= 5 and 
                 len(set(self.hit_buffer)) == 1 and
                 self.last_published != pointed.class_name):
                 
@@ -179,19 +180,33 @@ class VisionNode(Node):
 
 def main(args=None):
     import argparse
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--test", action="store_true", help="테스트 모드")
-    parser.add_argument("--webcam", action="store_true", help="웹캠 사용")
-    default_model = os.path.expanduser("~/FiXit_ws/src/vision/models/third_result.pt")
-    parser.add_argument("--model", type=str, default=default_model, help="YOLO 모델 경로")
-    
-    # ROS 인자와 분리
     import sys
-    custom_args = [arg for arg in (args or sys.argv[1:]) if arg.startswith('--')]
-    parsed = parser.parse_args(custom_args)
     
-    rclpy.init(args=args)
+    # 커맨드라인 인자 파싱
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", action="store_true", help="테스트 모드 (로봇 없이)")
+    parser.add_argument("--webcam", action="store_true", help="웹캠 사용")
+    parser.add_argument("--model", type=str, default=None, help="YOLO 모델 경로")
+    parser.add_argument("--calib-npy", type=str, default=None, help="캘리브레이션 NPY")
+    parser.add_argument("--calib-json", type=str, default=None, help="캘리브레이션 JSON")
+    
+    # sys.argv에서 직접 파싱
+    parsed = parser.parse_args()
+    
+    # 모델 경로 자동 탐색
+    if not parsed.model:
+        possible_model = os.path.expanduser("~/FiXit_ws/src/vision/models/result_4.pt")
+        if os.path.exists(possible_model):
+            parsed.model = possible_model
+            print(f"✓ 모델 자동 발견: {possible_model}")
+    
+    if not parsed.model or not os.path.exists(parsed.model):
+        print("Error: 모델 파일을 찾을 수 없습니다")
+        print("사용법: ros2 run vision ros_vision_node --model <경로>")
+        return
+    
+    # ROS2 초기화 (인자 없이)
+    rclpy.init()
     
     # === 테스트 모드 ===
     if parsed.test:
@@ -200,7 +215,6 @@ def main(args=None):
         print("="*50 + "\n")
         
         # 더미 로봇 주입
-        import sys
         sys.modules['DSR_ROBOT2'] = DummyRobot
         
         # 더미 캘리브레이션
@@ -219,13 +233,13 @@ def main(args=None):
         img_node = DummyImgNode(use_webcam=parsed.webcam)
         
         # 노드 실행
-        node = VisionNode(parsed.model, dummy_npy.name, dummy_json.name, img_node)
+        node = VisionNode(parsed.model, dummy_npy.name, img_node)
         
         try:
             print("실행 중... (Ctrl+C로 종료)\n")
             rclpy.spin(node)
         except KeyboardInterrupt:
-            pass
+            print("\n종료 중...")
         finally:
             os.unlink(dummy_npy.name)
             os.unlink(dummy_json.name)
@@ -233,9 +247,124 @@ def main(args=None):
         
         return
     
-    # === 프로덕션 모드 (미구현) ===
-    print("프로덕션 모드는 --test 옵션을 사용하세요")
-    rclpy.shutdown()
+    # === 프로덕션 모드 ===
+    print("\n" + "="*50)
+    print("  프로덕션 모드: 실제 로봇 + RealSense")
+    print("="*50 + "\n")
+    
+    # 캘리브레이션 파일 경로
+    if not parsed.calib_npy:
+        possible_npy = os.path.expanduser("~/FiXit_ws/src/vision/calibration/T_gripper2camera.npy")
+        if os.path.exists(possible_npy):
+            parsed.calib_npy = possible_npy
+    
+    if not parsed.calib_json:
+        possible_json = os.path.expanduser("~/FiXit_ws/src/vision/calibration/calibrate_data.json")
+        if os.path.exists(possible_json):
+            parsed.calib_json = possible_json
+    
+    if not parsed.calib_npy or not os.path.exists(parsed.calib_npy):
+        print("Error: 캘리브레이션 NPY 파일을 찾을 수 없습니다")
+        print("사용법: --calib-npy <경로>")
+        rclpy.shutdown()
+        return
+    
+    if not parsed.calib_json or not os.path.exists(parsed.calib_json):
+        print("Error: 캘리브레이션 JSON 파일을 찾을 수 없습니다")
+        print("사용법: --calib-json <경로>")
+        rclpy.shutdown()
+        return
+    
+    print(f"✓ 모델: {parsed.model}")
+    print(f"✓ 캘리브레이션 NPY: {parsed.calib_npy}")
+    print(f"✓ 캘리브레이션 JSON: {parsed.calib_json}")
+    
+    # 로봇 초기화
+    try:
+        import DR_init
+        ROBOT_ID = "dsr01"
+        
+        robot_node = rclpy.create_node("vision_interface_node", namespace=ROBOT_ID)
+        DR_init.__dsr__node = robot_node
+        
+        from DSR_ROBOT2 import get_current_posx
+        print("✓ 로봇 연결 성공")
+        
+        # 현재 로봇 포즈 확인
+        current_pose = get_current_posx()[0]
+        print(f"✓ 현재 로봇 포즈: {current_pose}")
+        
+    except Exception as e:
+        print(f"Error: 로봇 연결 실패 - {e}")
+        print("로봇이 연결되어 있는지 확인하세요")
+        rclpy.shutdown()
+        return
+    
+    # RealSense 카메라 초기화
+    try:
+        from vision.realsense import ImgNode
+        img_node = ImgNode()
+        print("✓ RealSense 카메라 토픽 구독 시작")
+        
+        # 카메라 준비 대기 (토픽이 발행될 때까지)
+        print("카메라 토픽 대기 중...")
+        import time
+        
+        # ImgNode가 토픽을 받을 수 있도록 spin
+        for i in range(10):  # 최대 5초 대기
+            rclpy.spin_once(img_node, timeout_sec=0.5)
+            
+            if img_node.get_color_frame() is not None:
+                print("✓ 카메라 프레임 수신 확인")
+                break
+            
+            if i == 9:
+                print("Warning: 카메라 프레임을 받을 수 없습니다")
+                print("RealSense 토픽 확인: ros2 topic list | grep camera")
+        
+        # intrinsics 대기
+        for i in range(10):
+            rclpy.spin_once(img_node, timeout_sec=0.5)
+            
+            if img_node.get_camera_intrinsic() is not None:
+                print("✓ 카메라 intrinsics 수신 확인")
+                break
+            
+            if i == 9:
+                print("Warning: 카메라 intrinsics를 받을 수 없습니다")
+        
+    except Exception as e:
+        print(f"Error: RealSense 연결 실패 - {e}")
+        print("RealSense가 연결되어 있는지 확인하세요")
+        print("토픽 확인: ros2 topic list | grep camera")
+        rclpy.shutdown()
+        return
+    
+    # Vision 노드 실행
+    try:
+        from rclpy.executors import MultiThreadedExecutor
+        
+        vision_node = VisionNode(
+            parsed.model,
+            parsed.calib_npy,
+            img_node
+        )
+        
+        # MultiThreadedExecutor로 ImgNode와 VisionNode 동시 실행
+        executor = MultiThreadedExecutor()
+        executor.add_node(vision_node)
+        executor.add_node(img_node)
+        
+        print("\n=== Vision 노드 실행 중 ===")
+        print("손가락으로 물체를 가리키세요!")
+        print("Ctrl+C로 종료\n")
+        
+        executor.spin()
+        
+    except KeyboardInterrupt:
+        print("\n종료 중...")
+    finally:
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

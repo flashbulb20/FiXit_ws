@@ -27,10 +27,11 @@ setup(
     entry_points={
         'console_scripts': [
             "ros_yolo = vision.ros_yolo:main",
-            "move_yolo = vision.move_yolo:main",
+            "move_robot = vision.move_robot:main",
             "open_grip = vision.open_grip:main",
             "close_grip = vision.close_grip:main",
             "go_home = vision.go_home:main",
+            "test_vision = vision.vision_detector:main",
             "vision_node = vision.ros_vision_node:main",
         ],
     },

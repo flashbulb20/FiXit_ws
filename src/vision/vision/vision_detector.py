@@ -35,14 +35,14 @@ class HandLandmarks:
 class ObjectDetector:
     """YOLO 기반 객체 검출기"""
     
-    def __init__(self, model_path: str, conf_threshold: float = 0.8):
+    def __init__(self, model_path: str, conf_threshold: float = 0.6):
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
     
     def detect(self, image: np.ndarray) -> List[Detection]:
         results = self.model(image,
                              conf=self.conf_threshold,
-                             classes=[0, 1, 2, 3],
+                             classes=[0,1,2,3],
                              verbose=False)
         
         detections = []
@@ -78,7 +78,7 @@ class HandDetector:
                  max_num_hands: int = 1,
                  min_detection_confidence: float = 0.7,
                  min_tracking_confidence: float = 0.5):
-        
+
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             max_num_hands=max_num_hands,
@@ -127,6 +127,10 @@ class PointingAnalyzer:
                           depth_image: np.ndarray,
                           intrinsics: dict,
                           depth_scale: float) -> Optional[np.ndarray]:
+
+        # Intrinsics 체크
+        if intrinsics is None:
+            return None
         
         u, v = pixel_coords
         h, w = depth_image.shape
@@ -135,10 +139,12 @@ class PointingAnalyzer:
         if not (0 <= u < w and 0 <= v < h):
             return None
         
-        z = depth_image[v, u] * depth_scale * 1000.0  # mm 단위
+        # Depth 값 직접 사용 (이미 mm 단위)
+        z = float(depth_image[v, u])
         if z <= 0:
             return None
         
+        # 카메라 좌표 계산
         x = (u - intrinsics['ppx']) * z / intrinsics['fx']
         y = (v - intrinsics['ppy']) * z / intrinsics['fy']
         
@@ -241,7 +247,7 @@ class VisionTester:
                          detections: List[Detection],
                          hand_landmarks: HandLandmarks,
                          pointed_object: Detection = None) -> np.ndarray:
-        
+
         vis_img = image.copy()
         
         # 1. 객체 검출 결과 그리기
@@ -422,16 +428,10 @@ if __name__ == "__main__":
     
     # 모델 경로 자동 찾기
     if args.model is None:
-        possible_paths = [
-            "third_result.pt",
-            "vision/third_result.pt",
-            os.path.expanduser("~/FiXit_ws/src/vision/vision/third_result.pt")
-        ]
-        for path in possible_paths:
-            if os.path.exists(path):
-                args.model = path
-                print(f"✓ 모델 발견: {path}")
-                break
+        possible_model = os.path.expanduser("~/FiXit_ws/src/vision/models/result_4.pt")
+        if os.path.exists(possible_model):
+            args.model = possible_model
+            print(f"✓ 모델 발견: {possible_model}")
     
     if args.model and not os.path.exists(args.model):
         print(f"⚠ 경고: 모델 파일을 찾을 수 없습니다: {args.model}")
