@@ -1,6 +1,5 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
@@ -9,7 +8,7 @@ import numpy as np
 import os
 from collections import deque
 
-from vision.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
+from fixi_project.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
 
 import DR_init
 
@@ -17,8 +16,6 @@ ROBOT_ID = "dsr01"
 
 
 class CommandVisionNode(Node):
-    """명령 기반 Vision 노드"""
-    
     def __init__(self, yolo_model_path: str, calibration_npy: str, img_node):
         super().__init__('command_vision_node')
         
@@ -63,16 +60,13 @@ class CommandVisionNode(Node):
         self.get_logger().info("  대기 중: /vision/cmd 토픽 구독")
     
     def command_callback(self, msg: String):
-        """명령 수신 콜백"""
         command = msg.data.strip().lower()
         self.get_logger().info(f"명령 수신: '{command}'")
         
         # 명령 파싱
         self._parse_command(command)
     
-    def _parse_command(self, command: str):
-        """명령 파싱 및 모드 설정"""
-        
+    def _parse_command(self, command: str):        
         # 1. 특정 객체가 명시된 경우
         object_keywords = {
             'pcb': ['pcb', '기판'],
@@ -111,7 +105,6 @@ class CommandVisionNode(Node):
         self._publish_status("명령을 인식할 수 없습니다")
     
     def main_loop(self):
-        """메인 처리 루프"""
         # 프레임 획득
         color_img = self.img_node.get_color_frame()
         depth_img = self.img_node.get_depth_frame()
@@ -133,8 +126,6 @@ class CommandVisionNode(Node):
             self._process_pointing_detection(color_img, depth_img)
     
     def _process_object_detection(self, color_img, depth_img):
-        """특정 객체 검출 모드"""
-        
         # 객체 검출
         detections = self.object_detector.detect(color_img)
         
@@ -172,9 +163,7 @@ class CommandVisionNode(Node):
                 self.current_mode = "IDLE"
                 self._publish_status("대기 중")
     
-    def _process_pointing_detection(self, color_img, depth_img):
-        """손가락 가리킴 검출 모드"""
-        
+    def _process_pointing_detection(self, color_img, depth_img):       
         # 객체 검출
         detections = self.object_detector.detect(color_img)
         
@@ -228,7 +217,6 @@ class CommandVisionNode(Node):
             self.hit_buffer.clear()
     
     def _camera_to_base(self, cam_coords):
-        """카메라 좌표 → 베이스 좌표"""
         from DSR_ROBOT2 import get_current_posx
         
         coord = np.append(cam_coords, 1)
@@ -246,7 +234,6 @@ class CommandVisionNode(Node):
         return base_coord
     
     def _publish_pose(self, position, object_name):
-        """위치 발행"""
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "base"
@@ -262,7 +249,6 @@ class CommandVisionNode(Node):
         self._publish_status(f"{object_name} 검출 완료")
     
     def _publish_status(self, message):
-        """상태 메시지 발행"""
         msg = String()
         msg.data = message
         self.status_pub.publish(msg)
@@ -304,7 +290,7 @@ def main(args=None):
     
     # 카메라 초기화
     try:
-        from vision.realsense import ImgNode
+        from fixi_project.realsense import ImgNode
         img_node = ImgNode()
         print("✓ RealSense")
         
@@ -319,8 +305,8 @@ def main(args=None):
         return
     
     # 파일 경로
-    model_path = parsed.model if parsed.model else os.path.expanduser("~/FiXit_ws/src/vision/models/result_4.pt")
-    calib_path = os.path.expanduser("~/FiXit_ws/src/vision/calibration/T_gripper2camera.npy")
+    model_path = parsed.model if parsed.model else os.path.expanduser("~/FiXit_ws/src/fixi_project/models/result_4.pt")
+    calib_path = os.path.expanduser("~/FiXit_ws/src/fixi_project/calibration/T_gripper2camera.npy")
     
     if not os.path.exists(model_path):
         print(f"Error: 모델 파일 없음 - {model_path}")

@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 from glob import glob
 import os
 
-package_name = 'vision'
+package_name = 'fixi_project'
 
 setup(
     name=package_name,
@@ -12,6 +12,9 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/models', ['fixi_project/hello_rokey_8332_32.tflite']),
+        ('share/' + package_name, ['fixi_project/.env']),
         (os.path.join('share', package_name, 'models'), 
             glob('models/*.pt')),
         (os.path.join('share', package_name, 'calibration'),
@@ -26,14 +29,17 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            "ros_yolo = vision.ros_yolo:main",
-            "move_robot = vision.move_robot:main",
-            "open_grip = vision.open_grip:main",
-            "close_grip = vision.close_grip:main",
-            "go_home = vision.go_home:main",
-            "test_vision = vision.vision_detector:main",
-            "vision_node = vision.ros_vision_node:main",
-            "cmd_vision = vision.cmd_vision:main",
+            "ros_yolo = fixi_project.ros_yolo:main",
+            "move_robot = fixi_project.move_robot:main",
+            "open_grip = fixi_project.open_grip:main",
+            "close_grip = fixi_project.close_grip:main",
+            "go_home = fixi_project.go_home:main",
+            "test_vision = fixi_project.vision_detector:main",
+            "vision_node = fixi_project.ros_vision_node:main",
+            "cmd_vision = fixi_project.cmd_vision:main",
+            "robot_move = fixi_project.robot_move:main",
+            "main_controller = fixi_project.main_controller:main",
+            "voice_node = fixi_project.voice_node:main",
         ],
     },
 )

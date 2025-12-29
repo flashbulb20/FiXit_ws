@@ -3,11 +3,21 @@ build/
 install/
 log/
 
+**/data_recording.py
 **/create_data_dirs.py
 **/move_images.py
 **/move_labels.py
 **/label_remapping.py
+
 **/open_grip.py
 **/close_grip.py
 **/go_home.py
+
+**/finger_detector.py
+**/go_home.py
+**/move_robot.py
+**/ros_vision_node.py
+**/ros_yolo.py
+**/yolo_finger.py
+
 **/test.py

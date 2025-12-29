@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>vision</name>
+  <name>fixi_project</name>
   <version>0.0.1</version>
-  <description>Vision package for robot manipulation with YOLO and MediaPipe</description>
+  <description>Fixi_project package for robot manipulation with YOLO and MediaPipe</description>
   <maintainer email="your_email@example.com">Your Name</maintainer>
   <license>Apache License 2.0</license>
 
