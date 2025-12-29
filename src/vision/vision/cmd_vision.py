@@ -7,7 +7,7 @@ from scipy.spatial.transform import Rotation
 import numpy as np
 from collections import deque
 
-from vision.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
+from fixi_project.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
 
 import DR_init
 
@@ -283,8 +283,8 @@ def main(args=None):
         return
     
     # 파일 경로
-    model_path = os.path.expanduser("~/FiXit_ws/src/vision/models/result_4.pt")
-    calib_path = os.path.expanduser("~/FiXit_ws/src/vision/calibration/T_gripper2camera.npy")
+    model_path = os.path.expanduser("~/fixi_ws/src/fixi_project/models/result_4.pt")
+    calib_path = os.path.expanduser("~/fixi_ws/src/fixi_project/calibration/T_gripper2camera.npy")
     
     # Vision 노드 생성
     vision_node = CommandVisionNode(model_path, calib_path, img_node)
