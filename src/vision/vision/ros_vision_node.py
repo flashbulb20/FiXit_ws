@@ -4,75 +4,13 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from scipy.spatial.transform import Rotation
 import numpy as np
-import json
 import os
-import tempfile
 from collections import deque
-import cv2
 
 from vision.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
 
 
-class DummyImgNode:
-    def __init__(self, use_webcam=True, camera_id=0):
-        self.intrinsics = {
-            'fx': 600.0, 'fy': 600.0,
-            'ppx': 320.0, 'ppy': 240.0
-        }
-        self.depth_scale = 0.001
-        
-        if use_webcam:
-            self.cap = cv2.VideoCapture(camera_id)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            print("✓ 웹캠 사용")
-        else:
-            import pyrealsense2 as rs
-            self.pipeline = rs.pipeline()
-            config = rs.config()
-            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-            config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-            profile = self.pipeline.start(config)
-            
-            intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
-            self.intrinsics = {'fx': intr.fx, 'fy': intr.fy, 'ppx': intr.ppx, 'ppy': intr.ppy}
-            self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
-            self.align = rs.align(rs.stream.color)
-            print("✓ RealSense 사용")
-        
-        self.use_webcam = use_webcam
-    
-    def get_camera_intrinsic(self):
-        return self.intrinsics
-    
-    def get_color_frame(self):
-        if self.use_webcam:
-            ret, frame = self.cap.read()
-            return frame if ret else None
-        else:
-            frames = self.pipeline.wait_for_frames()
-            aligned = self.align.process(frames)
-            return np.asanyarray(aligned.get_color_frame().get_data())
-    
-    def get_depth_frame(self):
-        if self.use_webcam:
-            return np.full((480, 640), 500, dtype=np.uint16)
-        else:
-            frames = self.pipeline.wait_for_frames()
-            aligned = self.align.process(frames)
-            return np.asanyarray(aligned.get_depth_frame().get_data())
-
-
-class DummyRobot:
-    """테스트용 더미 로봇"""
-    @staticmethod
-    def get_current_posx():
-        return [[400.0, 0.0, 600.0, 0.0, 180.0, 0.0]]
-
-
-class VisionNode(Node):
-    """Vision ROS2 노드"""
-    
+class VisionNode(Node):    
     def __init__(self, model_path, npy_path, img_node):
         super().__init__('vision_node')
         
@@ -81,7 +19,7 @@ class VisionNode(Node):
         self.intrinsics = self.img_node.get_camera_intrinsic()
         
         # RealSense depth는 이미 mm 단위 (depth_scale 사용 안 함)
-        self.depth_scale = 1.0  # 스케일 적용 안 함
+        self.depth_scale = 1.0
         self.get_logger().info(f"✓ depth_scale: {self.depth_scale} (RealSense는 이미 mm 단위)")
         
         # CV 모듈
@@ -94,8 +32,7 @@ class VisionNode(Node):
         self.get_logger().info(f"✓ 캘리브레이션 로드: {npy_path}")
         
         # Publisher
-        qos = QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT)
-        self.pub = self.create_publisher(PoseStamped, '/vision/target_pose', qos)
+        self.pub = self.create_publisher(PoseStamped, '/vision/target_pose', 10)
         
         # 상태
         self.hit_buffer = deque(maxlen=5)
@@ -180,7 +117,6 @@ class VisionNode(Node):
 
 def main(args=None):
     import argparse
-    import sys
     
     # 커맨드라인 인자 파싱
     parser = argparse.ArgumentParser()
@@ -207,45 +143,6 @@ def main(args=None):
     
     # ROS2 초기화 (인자 없이)
     rclpy.init()
-    
-    # === 테스트 모드 ===
-    if parsed.test:
-        print("\n" + "="*50)
-        print("  테스트 모드: 로봇 없이 독립 테스트")
-        print("="*50 + "\n")
-        
-        # 더미 로봇 주입
-        sys.modules['DSR_ROBOT2'] = DummyRobot
-        
-        # 더미 캘리브레이션
-        dummy_npy = tempfile.NamedTemporaryFile(suffix='.npy', delete=False)
-        dummy_json = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
-        
-        dummy_matrix = np.eye(4)
-        dummy_matrix[:3, 3] = [50, 0, 100]
-        np.save(dummy_npy.name, dummy_matrix)
-        json.dump({'poses': [[10.0, 5.0, -5.0, 0, 0, 0]]}, dummy_json)
-        
-        dummy_npy.close()
-        dummy_json.close()
-        
-        # 더미 카메라
-        img_node = DummyImgNode(use_webcam=parsed.webcam)
-        
-        # 노드 실행
-        node = VisionNode(parsed.model, dummy_npy.name, img_node)
-        
-        try:
-            print("실행 중... (Ctrl+C로 종료)\n")
-            rclpy.spin(node)
-        except KeyboardInterrupt:
-            print("\n종료 중...")
-        finally:
-            os.unlink(dummy_npy.name)
-            os.unlink(dummy_json.name)
-            rclpy.shutdown()
-        
-        return
     
     # === 프로덕션 모드 ===
     print("\n" + "="*50)
