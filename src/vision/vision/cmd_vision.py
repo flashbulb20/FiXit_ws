@@ -1,13 +1,15 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from scipy.spatial.transform import Rotation
 import numpy as np
+import os
 from collections import deque
 
-from fixi_project.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
+from vision.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
 
 import DR_init
 
@@ -15,6 +17,8 @@ ROBOT_ID = "dsr01"
 
 
 class CommandVisionNode(Node):
+    """명령 기반 Vision 노드"""
+    
     def __init__(self, yolo_model_path: str, calibration_npy: str, img_node):
         super().__init__('command_vision_node')
         
@@ -26,19 +30,25 @@ class CommandVisionNode(Node):
         self.depth_scale = 1.0
         
         # 2. CV 모듈 초기화
-        self.object_detector = ObjectDetector(yolo_model_path, conf_threshold=0.7)
+        self.object_detector = ObjectDetector(yolo_model_path, conf_threshold=0.6)
         self.hand_detector = HandDetector()
         self.pointing_analyzer = PointingAnalyzer(distance_threshold=50.0)
         
         # 3. 캘리브레이션
         self.gripper2cam = np.load(calibration_npy)
-        self.get_logger().info(f"✓ 캘리브레이션 로드: {calibration_npy}")
+        self.get_logger().info(f"✓ 캘리브레이션 로드")
         
         # 구독: 명령 수신
-        self.cmd_sub = self.create_subscription(String, '/vision/cmd', self.command_callback, 10)
+        self.cmd_sub = self.create_subscription(
+            String,
+            '/vision/cmd',
+            self.command_callback,
+            10
+        )
         
         # 발행: 검출 결과
         self.pose_pub = self.create_publisher(PoseStamped, '/vision/target_pose', 10)
+        self.status_pub = self.create_publisher(String, '/vision/status', 10)
         
         # 5. 상태 관리
         self.current_mode = "IDLE"  # IDLE, OBJECT_DETECT, POINTING_DETECT
@@ -53,6 +63,7 @@ class CommandVisionNode(Node):
         self.get_logger().info("  대기 중: /vision/cmd 토픽 구독")
     
     def command_callback(self, msg: String):
+        """명령 수신 콜백"""
         command = msg.data.strip().lower()
         self.get_logger().info(f"명령 수신: '{command}'")
         
@@ -60,45 +71,47 @@ class CommandVisionNode(Node):
         self._parse_command(command)
     
     def _parse_command(self, command: str):
+        """명령 파싱 및 모드 설정"""
+        
         # 1. 특정 객체가 명시된 경우
-        if any(obj in command for obj in ['pcb', '기판', 'flux', '플럭스', 'magnifier', '돋보기', 'pump', '흡입기']):
-            self.current_mode = "OBJECT_DETECT"
-            
-            # 객체 이름 추출
-            if 'pcb' in command or '기판' in command:
-                self.target_object = 'pcb'
-            elif 'flux' in command or '플럭스' in command:
-                self.target_object = 'flux'
-            elif 'magnifier' in command or '돋보기' in command:
-                self.target_object = 'magnifier'
-            elif 'pump' in command or '흡입기' in command:
-                self.target_object = 'pump'
-            
-            self.get_logger().info(f"모드: 객체 검출 - '{self.target_object}' 찾기")
-            self._publish_status(f"'{self.target_object}' 검색 중...")
-            
-        # 2. 불특정 객체 ('이것', '여기', '저것' 등)
-        elif command == "track_hand":
+        object_keywords = {
+            'pcb': ['pcb', '기판'],
+            'flux': ['flux', '플럭스'],
+            'magnifier': ['magnifier', '돋보기'],
+            'pump': ['pump', '흡입기']
+        }
+        
+        for obj_name, keywords in object_keywords.items():
+            if any(kw in command for kw in keywords):
+                self.current_mode = "OBJECT_DETECT"
+                self.target_object = obj_name
+                self.get_logger().info(f"모드: 객체 검출 - '{self.target_object}' 찾기")
+                self._publish_status(f"'{self.target_object}' 검색 중...")
+                return
+        
+        # 2. 손가락 가리킴 모드
+        if command == "track_hand":
             self.current_mode = "POINTING_DETECT"
             self.target_object = None
-            
             self.get_logger().info("모드: 손가락 가리킴 검출")
             self._publish_status("손가락으로 가리켜주세요")
-            
+            return
+        
         # 3. 중지 명령
-        elif any(word in command for word in ['중지', '취소', '멈춰']):
+        if any(word in command for word in ['중지', '취소', '멈춰', 'stop', 'cancel']):
             self.current_mode = "IDLE"
             self.target_object = None
             self.hit_buffer.clear()
-            
             self.get_logger().info("모드: IDLE")
             self._publish_status("대기 중")
+            return
         
-        else:
-            self.get_logger().warn(f"인식할 수 없는 명령: '{command}'")
-            self._publish_status("명령을 인식할 수 없습니다")
+        # 인식 불가
+        self.get_logger().warn(f"인식할 수 없는 명령: '{command}'")
+        self._publish_status("명령을 인식할 수 없습니다")
     
     def main_loop(self):
+        """메인 처리 루프"""
         # 프레임 획득
         color_img = self.img_node.get_color_frame()
         depth_img = self.img_node.get_depth_frame()
@@ -120,6 +133,8 @@ class CommandVisionNode(Node):
             self._process_pointing_detection(color_img, depth_img)
     
     def _process_object_detection(self, color_img, depth_img):
+        """특정 객체 검출 모드"""
+        
         # 객체 검출
         detections = self.object_detector.detect(color_img)
         
@@ -134,7 +149,7 @@ class CommandVisionNode(Node):
             self.get_logger().debug(f"'{self.target_object}' 찾는 중...")
             return
         
-        self.get_logger().info(f"'{self.target_object}' 발견!")
+        self.get_logger().info(f"✓ '{self.target_object}' 발견!")
         
         # 객체 중심의 3D 좌표 계산
         center_2d = target_detection.center_2d
@@ -158,6 +173,8 @@ class CommandVisionNode(Node):
                 self._publish_status("대기 중")
     
     def _process_pointing_detection(self, color_img, depth_img):
+        """손가락 가리킴 검출 모드"""
+        
         # 객체 검출
         detections = self.object_detector.detect(color_img)
         
@@ -205,12 +222,13 @@ class CommandVisionNode(Node):
                 self._publish_pose(base_coords, pointed_object.class_name)
                 
                 self.last_published = pointed_object.class_name
-                self.current_mode = "IDLE"  # 발행 후 IDLE
+                self.current_mode = "IDLE"
                 self._publish_status("대기 중")
         else:
             self.hit_buffer.clear()
     
     def _camera_to_base(self, cam_coords):
+        """카메라 좌표 → 베이스 좌표"""
         from DSR_ROBOT2 import get_current_posx
         
         coord = np.append(cam_coords, 1)
@@ -236,22 +254,40 @@ class CommandVisionNode(Node):
         msg.pose.position.y = float(position[1])
         msg.pose.position.z = float(position[2])
         
-        # 자세는 기본값 (Quaternion identity)
+        # 자세는 기본값
         msg.pose.orientation.w = 1.0
         
         self.pose_pub.publish(msg)
         self.get_logger().info(f"✓ 발행: {object_name} at {position.round(1)}")
         self._publish_status(f"{object_name} 검출 완료")
+    
+    def _publish_status(self, message):
+        """상태 메시지 발행"""
+        msg = String()
+        msg.data = message
+        self.status_pub.publish(msg)
 
 
 def main(args=None):
-    import os
+    import argparse
+    
+    # 인자 파싱
+    parser = argparse.ArgumentParser(description="Command-based Vision Node")
+    parser.add_argument("--test", action="store_true", help="테스트 모드 (로봇 없이)")
+    parser.add_argument("--webcam", action="store_true", help="웹캠 사용")
+    parser.add_argument("--model", type=str, default=None, help="YOLO 모델 경로")
+    
+    parsed = parser.parse_args()
     
     rclpy.init(args=args)
     
     print("\n" + "="*50)
     print("  Command-based Vision Node")
     print("="*50)
+    
+    # === 프로덕션 모드 ===
+    print("모드: 프로덕션 (실제 로봇)")
+    print("="*50 + "\n")
     
     # 로봇 초기화
     robot_node = rclpy.create_node("vision_interface_node", namespace=ROBOT_ID)
@@ -260,9 +296,9 @@ def main(args=None):
     try:
         from DSR_ROBOT2 import get_current_posx
         current = get_current_posx()[0]
-        print(f"✓ 로봇 연결: {current[:3]}")
+        print(f"✓ 로봇: {current[:3]}")
     except Exception as e:
-        print(f"Error: 로봇 연결 실패 - {e}")
+        print(f"Error: 로봇 실패 - {e}")
         rclpy.shutdown()
         return
     
@@ -270,12 +306,12 @@ def main(args=None):
     try:
         from vision.realsense import ImgNode
         img_node = ImgNode()
-        print("✓ RealSense 카메라")
+        print("✓ RealSense")
         
         for i in range(10):
             rclpy.spin_once(img_node, timeout_sec=0.5)
             if img_node.get_color_frame() is not None:
-                print("✓ 카메라 프레임 OK")
+                print("✓ 카메라 OK")
                 break
     except Exception as e:
         print(f"Error: 카메라 실패 - {e}")
@@ -283,10 +319,23 @@ def main(args=None):
         return
     
     # 파일 경로
-    model_path = os.path.expanduser("~/fixi_ws/src/fixi_project/models/result_4.pt")
-    calib_path = os.path.expanduser("~/fixi_ws/src/fixi_project/calibration/T_gripper2camera.npy")
+    model_path = parsed.model if parsed.model else os.path.expanduser("~/FiXit_ws/src/vision/models/result_4.pt")
+    calib_path = os.path.expanduser("~/FiXit_ws/src/vision/calibration/T_gripper2camera.npy")
     
-    # Vision 노드 생성
+    if not os.path.exists(model_path):
+        print(f"Error: 모델 파일 없음 - {model_path}")
+        rclpy.shutdown()
+        return
+    
+    if not os.path.exists(calib_path):
+        print(f"Error: 캘리브레이션 파일 없음 - {calib_path}")
+        rclpy.shutdown()
+        return
+    
+    print(f"✓ 모델: {model_path}")
+    print(f"✓ 캘리브: {calib_path}")
+    
+    # Vision 노드
     vision_node = CommandVisionNode(model_path, calib_path, img_node)
     
     # Executor
@@ -294,9 +343,8 @@ def main(args=None):
     executor.add_node(vision_node)
     executor.add_node(img_node)
     
-    print("\n구독 중: /vision/cmd")
-    print("발행: /vision/target_pose, /vision/status")
-    print("="*50 + "\n")
+    print("\n구독: /vision/cmd")
+    print("발행: /vision/target_pose, /vision/status\n")
     
     try:
         executor.spin()

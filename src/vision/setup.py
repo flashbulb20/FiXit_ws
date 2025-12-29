@@ -33,6 +33,7 @@ setup(
             "go_home = vision.go_home:main",
             "test_vision = vision.vision_detector:main",
             "vision_node = vision.ros_vision_node:main",
+            "cmd_vision = vision.cmd_vision:main",
         ],
     },
 )

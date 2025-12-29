@@ -17,7 +17,9 @@ ACCELERATION = 80
 SAFE_HEIGHT = 100.0
 
 
-class RobotMoverNode(Node):   
+class RobotMoverNode(Node):
+    """Vision에서 발행한 좌표로 로봇 이동"""
+    
     def __init__(self):
         super().__init__('robot_mover_node')
         
@@ -61,6 +63,7 @@ class RobotMoverNode(Node):
         self.get_logger().info(f"  - 안전 높이: {SAFE_HEIGHT}mm")
     
     def go_home(self):
+        """홈 포지션으로 이동"""
         try:
             home_joint = [0, 0, 90, 0, 90, 0]
             self.get_logger().info("홈 포지션으로 이동 중...")
@@ -71,6 +74,7 @@ class RobotMoverNode(Node):
             self.get_logger().error(f"홈 이동 실패: {e}")
     
     def pose_callback(self, msg: PoseStamped):
+        """토픽 수신 시 호출 - 큐에만 추가"""
         target_x = msg.pose.position.x
         target_y = msg.pose.position.y
         target_z = msg.pose.position.z
@@ -96,6 +100,7 @@ class RobotMoverNode(Node):
             self.get_logger().warn("명령 큐 가득참")
     
     def _robot_control_loop(self):
+        """별도 스레드에서 로봇 제어 (ROS2 콜백과 분리)"""
         while self.running:
             try:
                 # 명령 대기 (timeout으로 종료 확인 가능)
@@ -116,6 +121,7 @@ class RobotMoverNode(Node):
                 continue
     
     def move_to_target(self, x, y, z):
+        """목표 위치로 이동"""
         current_pose = self.get_current_posx()[0]
         rx, ry, rz = current_pose[3], current_pose[4], current_pose[5]
         
@@ -127,7 +133,7 @@ class RobotMoverNode(Node):
         mode = get_robot_mode()
         self.get_logger().info(f"로봇 모드: {mode}")
         
-        if mode != 1:  # 5 = 자동 모드
+        if mode != 1:
             self.get_logger().error(f"로봇이 자동 모드가 아닙니다! (현재: {mode})")
             self.get_logger().error("티치펜던트에서 자동 모드로 변경하세요")
             return
@@ -173,6 +179,7 @@ class RobotMoverNode(Node):
             self.get_logger().error(traceback.format_exc())
     
     def shutdown(self):
+        """종료"""
         self.get_logger().info("종료 중...")
         self.running = False
         self.robot_thread.join(timeout=2.0)
