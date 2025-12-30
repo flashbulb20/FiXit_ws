@@ -103,6 +103,60 @@ class CommandVisionNode(Node):
                 cfg = self.object_offsets[obj]
                 self.get_logger().info(f"    - {obj}: {cfg['description']} {cfg['pixel']}")
     
+    def _get_depth_robust(self, depth_img, center_2d, window_size=7):
+        u, v = int(center_2d[0]), int(center_2d[1])
+        h, w = depth_img.shape
+        
+        half_size = window_size // 2
+        
+        # 윈도우 범위
+        u_min = max(0, u - half_size)
+        u_max = min(w, u + half_size + 1)
+        v_min = max(0, v - half_size)
+        v_max = min(h, v + half_size + 1)
+        
+        # 윈도우 영역 추출
+        window = depth_img[v_min:v_max, u_min:u_max]
+        
+        # 유효한 Depth만 추출 (0 제외)
+        valid_depths = window[window > 0]
+        
+        if len(valid_depths) == 0:
+            self.get_logger().warn(f"[DEPTH] 유효한 Depth 없음 at ({u}, {v})")
+            return 0.0
+        
+        # 아웃라이어 제거 (IQR 방법)
+        if len(valid_depths) > 3:
+            q1 = np.percentile(valid_depths, 25)
+            q3 = np.percentile(valid_depths, 75)
+            iqr = q3 - q1
+            
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            
+            # 범위 내 값만 사용
+            filtered_depths = valid_depths[
+                (valid_depths >= lower_bound) & (valid_depths <= upper_bound)
+            ]
+            
+            if len(filtered_depths) > 0:
+                valid_depths = filtered_depths
+        
+        # 평균 계산
+        mean_depth = float(np.mean(valid_depths))
+        
+        # 디버그 정보
+        single_pixel_depth = float(depth_img[v, u]) if depth_img[v, u] > 0 else 0.0
+        diff = abs(mean_depth - single_pixel_depth) if single_pixel_depth > 0 else 0.0
+        
+        self.get_logger().debug(
+            f"[DEPTH] 단일: {single_pixel_depth:.1f}mm, "
+            f"평균({window_size}×{window_size}): {mean_depth:.1f}mm, "
+            f"차이: {diff:.1f}mm"
+        )
+        
+        return mean_depth
+    
     def command_callback(self, msg: String):
         command = msg.data.strip().lower()
         self.get_logger().info(f"[CMD] 명령 수신: '{command}'")
@@ -189,8 +243,6 @@ class CommandVisionNode(Node):
             self._publish_debug_image()
     
     def _apply_offset(self, center_2d, obj_class_name):
-        """✅ 물체별 Offset 적용"""
-        
         offset_config = self.object_offsets.get(obj_class_name.lower(), None)
         
         if offset_config is None or not offset_config['enabled']:
@@ -211,7 +263,6 @@ class CommandVisionNode(Node):
         return (adjusted_u, adjusted_v)
     
     def _draw_detections(self, detections):
-        """YOLO 검출 결과 시각화"""
         if self.debug_frame is None:
             return
         
@@ -247,7 +298,6 @@ class CommandVisionNode(Node):
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
     
     def _draw_hand(self, hand_landmarks):
-        """손 랜드마크 시각화"""
         if self.debug_frame is None or hand_landmarks is None:
             return
         
@@ -332,7 +382,6 @@ class CommandVisionNode(Node):
             self.get_logger().error(traceback.format_exc())
     
     def _draw_intersection(self, intersection_2d):
-        """교점 시각화"""
         if self.debug_frame is None or intersection_2d is None:
             return
         
@@ -343,7 +392,6 @@ class CommandVisionNode(Node):
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     
     def _draw_buffer_status(self):
-        """버퍼 상태 표시"""
         if self.debug_frame is None:
             return
         
@@ -387,7 +435,6 @@ class CommandVisionNode(Node):
                          (0, 255, 0), -1)
     
     def _publish_debug_image(self):
-        """ROS2 Image 토픽으로 발행"""
         if self.debug_frame is None:
             return
         
@@ -400,15 +447,10 @@ class CommandVisionNode(Node):
         except Exception as e:
             self.get_logger().error(f"이미지 발행 실패: {e}")
     
-    def _calculate_ray_object_intersection(self, hand_landmarks, detection, depth_img):
-        """손가락 광선과 물체의 교점 계산"""
-        
+    def _calculate_ray_object_intersection(self, hand_landmarks, detection, depth_img):       
         h, w = depth_img.shape
         
-        try:
-            # ✅ fixi_project.vision_detector.HandLandmarks 구조
-            # 속성: fingertip_2d, fingertip_3d, pointing_ray, wrist_2d, wrist_3d
-            
+        try:            
             # 손가락 끝
             if not hasattr(hand_landmarks, 'fingertip_2d'):
                 return None, None
@@ -481,11 +523,6 @@ class CommandVisionNode(Node):
             return None, None
     
     def _process_hold_point(self, color_img, depth_img):
-        """
-        '여기 잡아줘' 모드
-        객체 검출 없이 손끝 위치로 직접 이동
-        """
-        
         # ✅ 객체 검출 제거 - 손만 검출
         hand_landmarks = self.hand_detector.detect(color_img)
         
@@ -515,8 +552,8 @@ class CommandVisionNode(Node):
             self.hit_buffer.clear()
             return
         
-        # ✅ 손끝 위치의 Depth 값으로 3D 좌표 계산
-        z = float(depth_img[v, u]) * self.depth_scale
+        # ✅ 개선: 5×5 윈도우 평균 (손끝은 작은 영역)
+        z = self._get_depth_robust(depth_img, (u, v), window_size=5) * self.depth_scale
         
         if z <= 0:
             self.get_logger().warn(f"[HOLD] 유효하지 않은 Depth: z={z}")
@@ -559,8 +596,6 @@ class CommandVisionNode(Node):
             self.last_published = position_key
     
     def _process_object_detection(self, color_img, depth_img):
-        """특정 객체 검출 모드"""
-        
         detections = self.object_detector.detect(color_img)
         self._draw_detections(detections)
         
@@ -584,12 +619,15 @@ class CommandVisionNode(Node):
         u, v = center_2d_adjusted
         
         if 0 <= u < depth_img.shape[1] and 0 <= v < depth_img.shape[0]:
-            z = float(depth_img[v, u]) * self.depth_scale
+            # ✅ 개선: 7×7 윈도우 평균 (아웃라이어 제거)
+            z = self._get_depth_robust(depth_img, (u, v), window_size=7) * self.depth_scale
             
             if z > 0:
                 x = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
                 y = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
                 camera_coords = np.array([x, y, z])
+                
+                self.get_logger().info(f"[OBJ] 3D 좌표: {camera_coords.round(3)}")
                 
                 base_coords = self._camera_to_base(camera_coords)
                 self._publish_pose(base_coords, target_detection.class_name)
@@ -602,8 +640,6 @@ class CommandVisionNode(Node):
             self.get_logger().warn(f"좌표 범위 초과: u={u}, v={v}")
     
     def _process_pointing_detection(self, color_img, depth_img):
-        """손가락 가리킴 검출 모드"""
-        
         detections = self.object_detector.detect(color_img)
         self._draw_detections(detections)
         
@@ -648,11 +684,14 @@ class CommandVisionNode(Node):
             # 조정된 2D 좌표로 3D 재계산
             u, v = center_2d_adjusted
             if 0 <= u < depth_img.shape[1] and 0 <= v < depth_img.shape[0]:
-                z = float(depth_img[v, u]) * self.depth_scale
+                # ✅ 개선: 7×7 윈도우 평균 (객체 표면)
+                z = self._get_depth_robust(depth_img, (u, v), window_size=7) * self.depth_scale
                 if z > 0:
                     x = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
                     y = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
                     camera_coords_adjusted = np.array([x, y, z])
+                    
+                    self.get_logger().info(f"[POINT] 3D 좌표: {camera_coords_adjusted.round(3)}")
                     
                     self.hit_buffer.append(pointed_object.class_name)
                     
@@ -696,7 +735,6 @@ class CommandVisionNode(Node):
         return base_coord
     
     def _publish_pose(self, position, object_name):
-        """좌표 발행"""
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "base"
