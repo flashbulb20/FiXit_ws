@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'voice_control'
+package_name = 'fixi_project'
 
 setup(
     name=package_name,
@@ -10,8 +10,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/models', ['voice_control/hello_rokey_8332_32.tflite']),
-        ('share/' + package_name, ['voice_control/.env']),
+        ('share/' + package_name + '/models', ['fixi_project/hello_rokey_8332_32.tflite']),
+        ('share/' + package_name, ['fixi_project/.env']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -26,7 +26,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'voice_cmd_node = voice_control.voice_cmd_node:main',
+            'voice_node = fixi_project.voice_cmd_node:main',
         ],
     },
 )
