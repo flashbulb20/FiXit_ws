@@ -1,141 +1,249 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped
-from enum import Enum
-
-class State(Enum):
-    IDLE = 0
-    LISTEN = 1
-    SENSING = 2
-    PLANNING = 3
-    ACTION = 4
-    FEEDBACK = 5
+import time
+import threading
+import math
 
 class MainController(Node):
     def __init__(self):
         super().__init__('main_controller')
+        self.get_logger().info("🚀 Fixit Main Controller Started (Joint Mode)")
 
-        # 상태 초기화
-        self.state = State.IDLE
-        self.get_logger().info('=== FiXiT Main Controller Initialized (State: IDLE) ===')
+        # =========================================================
+        # 1. 통신 인터페이스 설정
+        # =========================================================
+        self.create_subscription(String, '/voice/cmd', self.voice_callback, 10)
+        self.create_subscription(String, '/robot/status', self.robot_status_callback, 10)
+        self.create_subscription(PoseStamped, '/vision/target_pose', self.vision_pose_callback, 10)
 
-        # --- Publishers ---
-        # 4.1 Voice Node로 TTS 출력 요청
-        self.voice_tts_pub = self.create_publisher(String, '/voice/tts', 10)
-        # 4.2 Vision Node로 비전 모드 전환 명령
-        self.vision_cmd_pub = self.create_publisher(String, '/vision/cmd', 10)
-        # 4.3 Robot Node로 이동 목표 및 그리퍼 제어 명령
         self.robot_pose_pub = self.create_publisher(PoseStamped, '/robot/target_pose', 10)
+        self.robot_nudge_pub = self.create_publisher(String, '/robot/nudge_cmd', 10) # 이제 이걸로 명령
+        self.robot_jog_pub = self.create_publisher(String, '/robot/jog', 10)
         self.robot_gripper_pub = self.create_publisher(String, '/robot/gripper', 10)
+        self.vision_cmd_pub = self.create_publisher(String, '/vision/cmd', 10)
+        self.tts_pub = self.create_publisher(String, '/voice/tts', 10)
 
-        # --- Subscribers ---
-        # 4.1 Voice Node로부터 사용자 명령 수신
-        self.voice_cmd_sub = self.create_subscription(String, '/voice/cmd', self.voice_cmd_callback, 10)
-        # 4.2 Vision Node로부터 타겟 좌표 및 상태 수신
-        self.vision_pose_sub = self.create_subscription(PoseStamped, '/vision/target_pose', self.vision_pose_callback, 10)
-        self.vision_status_sub = self.create_subscription(String, '/vision/status', self.vision_status_callback, 10)
-        # 4.3 Robot Node로부터 동작 상태 수신
-        self.robot_status_sub = self.create_subscription(String, '/robot/status', self.robot_status_callback, 10)
+        # =========================================================
+        # 2. 상태 및 변수 초기화
+        # =========================================================
+        self.latest_robot_status = ""
+        self.detected_pose = None
+        self.state = "IDLE"
+        self.target_type = "TOOL"
 
-        # 임시 데이터 저장 변수
-        self.current_target_pose = None
-        self.current_command = ""
+        # [수정] 좌표 설정 제거 (Robot Node에서 posj로 처리)
+        # 이제 Main은 좌표를 몰라도 됩니다. "명령어"만 보냅니다.
 
-    def voice_cmd_callback(self, msg):
-        """LISTEN 단계: 음성 명령 수신 및 분석"""
-        if self.state == State.IDLE:
-            self.current_command = msg.data
-            self.get_logger().info(f'Voice Command Received: "{self.current_command}"')
-            self.state = State.LISTEN
-            
-            # SENSING 단계 진입: 비전 노드에 물체 탐색 명령 발행
-            self.start_sensing()
-
-    def start_sensing(self):
-        """SENSING 단계: 비전 모드 전환"""
-        self.get_logger().info('State: SENSING - Requesting Vision Detection...')
-        vision_msg = String()
-        
-        # 명령 분석 로직 (예시)
-        if "iron" in self.current_command:
-            vision_msg.data = "find_iron"
-        elif "hand" in self.current_command:
-            vision_msg.data = "track_hand"
-        else:
-            vision_msg.data = "idle"
-            
-        self.vision_cmd_pub.publish(vision_msg)
-        self.state = State.SENSING
-
-    def vision_status_callback(self, msg):
-        """비전 인식 상태 확인"""
-        if self.state == State.SENSING:
-            if msg.data == "fail":
-                self.get_logger().error("Vision Detection Failed!")
-                self.send_feedback("인식에 실패했습니다. 다시 시도해주세요.")
-                self.state = State.IDLE
+    # =========================================================
+    # 3. 콜백 함수
+    # =========================================================
+    def robot_status_callback(self, msg):
+        self.latest_robot_status = msg.data
 
     def vision_pose_callback(self, msg):
-        """PLANNING 단계: 좌표 수신 및 검증"""
-        if self.state == State.SENSING:
-            self.get_logger().info('Target Pose Received. State: PLANNING')
-            self.current_target_pose = msg
-            self.state = State.PLANNING
-            
-            # 좌표 유효성 검증 (안전 영역 체크 로직이 들어갈 자리)
-            if self.validate_pose(msg):
-                self.execute_action()
-            else:
-                self.send_feedback("안전 범위를 벗어난 좌표입니다.")
-                self.state = State.IDLE
+        self.detected_pose = msg
+        self.get_logger().debug(f"👁️ Vision Detected: x={msg.pose.position.x:.2f}, y={msg.pose.position.y:.2f}")
 
-    def validate_pose(self, pose):
-        """좌표 유효성 검증 로직 (여기서는 항상 True 반환)"""
-        return True
+    def voice_callback(self, msg):
+        """음성 명령 파싱 및 스레드 분배"""
+        command = msg.data.lower().strip()
+        self.get_logger().info(f"\n📢 [VOICE CMD] Received: '{command}'")
 
-    def execute_action(self):
-        """ACTION 단계: 로봇 이동 명령 발행"""
-        self.get_logger().info('State: ACTION - Moving Robot to Target...')
-        self.robot_pose_pub.publish(self.current_target_pose)
-        self.state = State.ACTION
-
-    def robot_status_callback(self, msg):
-        """로봇 동작 완료 및 그리퍼 제어"""
-        if self.state == State.ACTION:
-            if msg.data == "arrived":
-                self.get_logger().info('Robot Arrived. Controlling Gripper...')
-                gripper_msg = String()
-                gripper_msg.data = "close" # 명령에 따라 open/close 결정
-                self.robot_gripper_pub.publish(gripper_msg)
-            
-            elif msg.data == "gripped" or msg.data == "done":
-                self.get_logger().info('Action Complete. State: FEEDBACK')
-                self.state = State.FEEDBACK
-                self.send_feedback("작업을 완료했습니다.")
-
-    def send_feedback(self, text):
-        """FEEDBACK 단계: TTS 출력 및 IDLE 복귀"""
-        self.get_logger().info(f'Sending Feedback: {text}')
-        tts_msg = String()
-        tts_msg.data = text
-        self.voice_tts_pub.publish(tts_msg)
+        if "stop" in command or "멈춰" in command:
+            self.stop_all()
+            return
         
-        # 모든 공정 완료 후 대기 상태로 복귀
-        self.state = State.IDLE
-        self.get_logger().info('=== State: IDLE (Waiting for next command) ===')
+        if command == "go_home" or command == "home":
+            self.get_logger().info("🏠 Action: Go Home")
+            self.robot_nudge_pub.publish(String(data="START_TASK"))
+            return
+
+        if "_" in command:
+            parts = command.split("_")
+            action = parts[0]
+            target = parts[1] if len(parts) > 1 else ""
+        else:
+            action = command
+            target = ""
+
+        self.get_logger().info(f"🧩 Parsed -> Action: {action}, Target: {target}")
+
+        # --- [Logic Tree] ---
+
+        # 1. J6 회전 (Jog)
+        if action in ["turn", "rotate", "spin", "jog", "돌려", "회전"]:
+            jog_cmd = "TURN_FRONT"
+            if target in ["left", "counter", "반시계", "왼쪽", "back"]:
+                jog_cmd = "TURN_BACK"
+            elif target in ["right", "clock", "시계", "오른쪽", "front"]:
+                jog_cmd = "TURN_FRONT"
+            
+            self.get_logger().info(f"🔄 J6 Rotating: {jog_cmd}")
+            self.robot_jog_pub.publish(String(data=jog_cmd))
+
+        # 2. 미세 조정 (Nudge)
+        elif action == "move" or action == "nudge":
+            self.robot_nudge_pub.publish(String(data=target.upper()))
+
+        # 3. 도구 가져오기 (Fetch)
+        elif action == "fetch" or action == "bring" or action == "get":
+            threading.Thread(target=self.sequence_fetch, args=(target,)).start()
+
+        # 4. 잡아주기 (Hold)
+        elif action == "hold":
+            if "pcb" in target:
+                self.target_type = "PCB"
+                threading.Thread(target=self.sequence_hold_pcb).start()
+            elif "here" in target or "여기" in command: 
+                self.target_type = "TOOL"
+                threading.Thread(target=self.sequence_hold_point).start()
+            else: 
+                pass
+
+        # 5. 파지 트리거 (Catch)
+        elif (action == "catch" or action == "grab") and self.state == "WAITING_FOR_CATCH":
+            self.get_logger().info("🔒 Catch Trigger 확인!")
+            
+            if self.target_type == "PCB":
+                self.robot_gripper_pub.publish(String(data="close"))
+                self.tts_pub.publish(String(data="기판을 잡았습니다."))
+            else:
+                self.robot_gripper_pub.publish(String(data="close"))
+                self.tts_pub.publish(String(data="잡았습니다."))
+            
+            self.state = "IDLE"
+
+        # 6. 놓기 (Release/Drop) - [새로 추가된 부분]
+        elif action in ["release", "drop", "open", "put", "let", "놔", "놓아", "풀어"]:
+            self.get_logger().info("🔓 Action: Release (Open Gripper)")
+            self.robot_gripper_pub.publish(String(data="open"))
+            self.tts_pub.publish(String(data="물건을 놓습니다."))
+            self.state = "IDLE"
+
+    # =========================================================
+    # 4. 시퀀스 로직 (Wait 함수 - 부분 일치 확인)
+    # =========================================================
+    def wait_for_robot(self, target_status, timeout=10.0):
+        self.latest_robot_status = ""
+        self.get_logger().info(f"⏳ Waiting for Robot status containing: '{target_status}' (Timeout: {timeout}s)")
+        
+        start = time.time()
+        while time.time() - start < timeout:
+            if target_status in self.latest_robot_status:
+                self.get_logger().info(f"✅ Robot Reached: '{self.latest_robot_status}'")
+                return True
+            time.sleep(0.1)
+        
+        self.get_logger().error(f"❌ Robot Timeout! Waited for '{target_status}'")
+        return False
+
+    def wait_for_vision(self, timeout=10.0):
+        self.detected_pose = None
+        self.get_logger().info(f"⏳ Waiting for Vision Target... (Timeout: {timeout}s)")
+        
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.detected_pose is not None:
+                return self.detected_pose
+            time.sleep(0.1)
+        return None
+
+    # --- [A. 도구 가져오기] ---
+    def sequence_fetch(self, tool_name):
+        self.state = "FETCHING"
+        self.get_logger().info(f"--- [START] Sequence Fetch: {tool_name} ---")
+        self.tts_pub.publish(String(data=f"{tool_name}를 찾고 있습니다."))
+        
+        # 1. Vision 탐색
+        self.vision_cmd_pub.publish(String(data=f"find_{tool_name}"))
+        target_pose = self.wait_for_vision()
+        if not target_pose: 
+            self.tts_pub.publish(String(data="물건을 찾을 수 없습니다."))
+            self.state = "IDLE"
+            return
+
+        # 2. 로봇 이동 (Vision 좌표)
+        self.get_logger().info("🚀 Moving Robot to Target...")
+        self.robot_pose_pub.publish(target_pose)
+        if not self.wait_for_robot("arrived"): return 
+
+        # 3. 잡기
+        grip_cmd = "close"
+        self.get_logger().info(f"✊ Gripping ({grip_cmd})...")
+        self.robot_gripper_pub.publish(String(data=grip_cmd))
+        if not self.wait_for_robot("gripped"): return
+
+        time.sleep(0.5)
+
+        # 4. Handover 이동 (수정됨: 명령어로 변경)
+        self.get_logger().info("🚚 Moving to Handover Position...")
+        # 좌표값 대신 명령어를 보냅니다.
+        self.robot_nudge_pub.publish(String(data="HANDOVER")) 
+        if not self.wait_for_robot("arrived"): return
+
+        # 5. 전달
+        self.robot_gripper_pub.publish(String(data="open"))
+        self.tts_pub.publish(String(data="여기 있습니다."))
+        self.get_logger().info("--- [END] Sequence Fetch Complete ---")
+        
+
+    # --- [B. PCB 잡아주기] ---
+    def sequence_hold_pcb(self):
+        self.state = "PREPARING_HOLD"
+        self.get_logger().info("--- [START] Sequence Hold PCB ---")
+        self.tts_pub.publish(String(data="파지 준비 중입니다."))
+
+        # 1. 대기 위치 이동 (수정됨: 명령어로 변경)
+        self.robot_nudge_pub.publish(String(data="HANDOVER"))
+        if not self.wait_for_robot("arrived"): return
+
+        self.robot_gripper_pub.publish(String(data="open"))
+        self.wait_for_robot("opened")
+
+        self.tts_pub.publish(String(data="기판을 넣고 잡아, 라고 말해주세요."))
+        self.state = "WAITING_FOR_CATCH"
+        self.get_logger().info("💤 State changed to WAITING_FOR_CATCH")
+
+    # --- [D. 가리킨 곳 잡아주기] ---
+    def sequence_hold_point(self):
+        self.state = "SCANNING"
+        self.get_logger().info("--- [START] Sequence Hold Point (Here) ---")
+        self.tts_pub.publish(String(data="손을 보여주세요."))
+
+        # 1. 관측 위치 이동 (수정됨: 명령어로 변경)
+        self.robot_nudge_pub.publish(String(data="SCAN"))
+        if not self.wait_for_robot("arrived"): return
+
+        self.vision_cmd_pub.publish(String(data="track_hand"))
+        hand_pose = self.wait_for_vision(timeout=60.0)
+
+        if not hand_pose:
+            self.tts_pub.publish(String(data="손을 놓쳤습니다."))
+            self.state = "IDLE"
+            return
+
+        self.get_logger().info("🚀 Moving to Hand Position...")
+        self.robot_gripper_pub.publish(String(data="open"))
+        self.robot_pose_pub.publish(hand_pose)
+        if not self.wait_for_robot("arrived"): return
+
+        self.tts_pub.publish(String(data="잡을까요? 잡아, 라고 말해주세요."))
+        self.state = "WAITING_FOR_CATCH"
+        self.get_logger().info("💤 State changed to WAITING_FOR_CATCH")
+
+    def stop_all(self):
+        self.get_logger().warn("🚨 EMERGENCY STOP TRIGGERED")
+        self.robot_jog_pub.publish(String(data="STOP"))
+        self.state = "IDLE"
 
 def main(args=None):
     rclpy.init(args=args)
     node = MainController()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
