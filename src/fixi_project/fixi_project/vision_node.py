@@ -296,7 +296,7 @@ class CommandVisionNode(Node):
             cv2.line(self.debug_frame, (wrist_x, wrist_y), (tip_x, tip_y), (255, 255, 0), 3)
             
             # ✅ 손 깊이 표시 (hand_depth)
-            if hasattr(hand_landmarks, 'hand_depth') and hand_landmarks.hand_depth > 0:
+            if hasattr(hand_landmarks, 'hand_depth') and hand_landmarks.hand_depth != 0.0:
                 depth_text = f"depth: {hand_landmarks.hand_depth:.3f}"
                 cv2.putText(self.debug_frame, depth_text, (wrist_x, wrist_y+30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
@@ -490,7 +490,7 @@ class CommandVisionNode(Node):
         hand_landmarks = self.hand_detector.detect(color_img)
         
         # 손 깊이 정보 로그
-        if hand_landmarks is not None and hand_landmarks.hand_depth > 0:
+        if hand_landmarks is not None and hand_landmarks.hand_depth != 0.0:
             self.get_logger().info(f"[HOLD] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
         
         self._draw_hand(hand_landmarks)
@@ -614,7 +614,7 @@ class CommandVisionNode(Node):
         hand_landmarks = self.hand_detector.detect(color_img)
         
         # ✅ 손 깊이 정보 로그
-        if hand_landmarks is not None and hand_landmarks.hand_depth > 0:
+        if hand_landmarks is not None and hand_landmarks.hand_depth != 0.0:
             self.get_logger().info(f"[POINT] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
         
         self._draw_hand(hand_landmarks)

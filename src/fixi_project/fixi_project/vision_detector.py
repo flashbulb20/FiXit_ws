@@ -43,7 +43,7 @@ class ObjectDetector:
     def detect(self, image: np.ndarray) -> List[Detection]:
         results = self.model(image,
                              conf=self.conf_threshold,
-                             classes=[0,1,2,3,5],
+                             classes=[0,1,2,3],
                              verbose=False)
         
         detections = []
