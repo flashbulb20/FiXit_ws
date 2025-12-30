@@ -53,6 +53,9 @@ class CommandVisionNode(Node):
         self.hit_buffer = deque(maxlen=5)
         self.last_published = None
         
+        # 디버깅 카운터
+        self.debug_counter = 0
+        
         # 6. 메인 루프
         self.create_timer(1/15.0, self.main_loop)
         
@@ -87,7 +90,10 @@ class CommandVisionNode(Node):
         if command == "track_hand":
             self.current_mode = "POINTING_DETECT"
             self.target_object = None
+            self.hit_buffer.clear()
+            self.debug_counter = 0
             self.get_logger().info("모드: 손가락 가리킴 검출")
+            self.get_logger().info("🖐️ 손으로 물체를 가리켜주세요 (5회 연속 감지 필요)")
             self._publish_status("손가락으로 가리켜주세요")
             return
         
@@ -163,20 +169,40 @@ class CommandVisionNode(Node):
                 self.current_mode = "IDLE"
                 self._publish_status("대기 중")
     
-    def _process_pointing_detection(self, color_img, depth_img):       
+    def _process_pointing_detection(self, color_img, depth_img):
+        """손가락 가리킴 검출 모드 - 디버깅 강화"""
+        
+        # 디버깅: 3초마다 상태 출력
+        self.debug_counter += 1
+        if self.debug_counter % 45 == 0:  # 15fps * 3초
+            self.get_logger().info(f"🔍 [Pointing Mode] 감지 대기 중... (버퍼: {len(self.hit_buffer)}/5)")
+        
         # 객체 검출
         detections = self.object_detector.detect(color_img)
         
         if len(detections) == 0:
+            if self.debug_counter % 45 == 0:
+                self.get_logger().warn("⚠️ 물체가 감지되지 않습니다")
             self.hit_buffer.clear()
             return
+        
+        # 디버깅: 감지된 객체 출력
+        if self.debug_counter % 45 == 0:
+            obj_names = [d.class_name for d in detections]
+            self.get_logger().info(f"✓ 감지된 물체: {obj_names}")
         
         # 손 검출
         hand_landmarks = self.hand_detector.detect(color_img)
         
         if hand_landmarks is None:
+            if self.debug_counter % 45 == 0:
+                self.get_logger().warn("⚠️ 손이 감지되지 않습니다")
             self.hit_buffer.clear()
             return
+        
+        # 디버깅: 손 감지됨
+        if self.debug_counter % 45 == 0:
+            self.get_logger().info("✓ 손 감지됨")
         
         # 3D 정보 업데이트
         try:
@@ -198,13 +224,20 @@ class CommandVisionNode(Node):
         )
         
         if pointed_object:
-            self.get_logger().info(f"가리킴: {pointed_object.class_name}")
+            self.get_logger().info(f"👉 가리킴 감지: {pointed_object.class_name} (버퍼: {len(self.hit_buffer)+1}/5)")
             self.hit_buffer.append(pointed_object.class_name)
+            
+            # 버퍼 상태 표시
+            if len(self.hit_buffer) >= 2:
+                buffer_items = list(self.hit_buffer)
+                self.get_logger().info(f"   버퍼 내용: {buffer_items}")
             
             # 5회 연속 같은 객체
             if (len(self.hit_buffer) >= 5 and
                 len(set(self.hit_buffer)) == 1 and
                 self.last_published != pointed_object.class_name):
+                
+                self.get_logger().info(f"✅ 5회 연속 감지 완료: {pointed_object.class_name}")
                 
                 # 베이스 좌표로 변환 및 발행
                 base_coords = self._camera_to_base(pointed_object.center_3d)
@@ -214,6 +247,9 @@ class CommandVisionNode(Node):
                 self.current_mode = "IDLE"
                 self._publish_status("대기 중")
         else:
+            # 가리킴 감지 안됨
+            if len(self.hit_buffer) > 0:
+                self.get_logger().info(f"❌ 가리킴 감지 실패 - 버퍼 초기화 (이전: {list(self.hit_buffer)})")
             self.hit_buffer.clear()
     
     def _camera_to_base(self, cam_coords):
