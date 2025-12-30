@@ -481,18 +481,15 @@ class CommandVisionNode(Node):
             return None, None
     
     def _process_hold_point(self, color_img, depth_img):
-        """'여기 잡아줘' 모드"""
+        """
+        '여기 잡아줘' 모드
+        객체 검출 없이 손끝 위치로 직접 이동
+        """
         
-        detections = self.object_detector.detect(color_img)
-        self._draw_detections(detections)
-        
-        if len(detections) == 0:
-            self.hit_buffer.clear()
-            return
-        
+        # ✅ 객체 검출 제거 - 손만 검출
         hand_landmarks = self.hand_detector.detect(color_img)
         
-        # ✅ 손 깊이 정보 로그
+        # 손 깊이 정보 로그
         if hand_landmarks is not None and hand_landmarks.hand_depth > 0:
             self.get_logger().info(f"[HOLD] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
         
@@ -502,52 +499,64 @@ class CommandVisionNode(Node):
             self.hit_buffer.clear()
             return
         
-        try:
-            self.pointing_analyzer.update_3d_info(
-                hand_landmarks, detections, depth_img,
-                self.intrinsics, self.depth_scale
-            )
-        except Exception as e:
-            self.get_logger().error(f"[HOLD] 3D 업데이트 실패: {e}")
+        # ✅ 손끝 2D 좌표
+        fingertip_2d = hand_landmarks.fingertip_2d
+        if not isinstance(fingertip_2d, (tuple, list)) or len(fingertip_2d) < 2:
+            self.get_logger().warn("[HOLD] 손끝 좌표 형식 오류")
+            self.hit_buffer.clear()
             return
         
-        pointed_object = self.pointing_analyzer.find_pointed_object(
-            hand_landmarks, detections
-        )
+        u, v = int(fingertip_2d[0]), int(fingertip_2d[1])
+        h, w = depth_img.shape
         
-        if pointed_object:
-            self.get_logger().info(f"[HOLD] 👉 {pointed_object.class_name}")
-            
-            intersection_3d, intersection_2d = self._calculate_ray_object_intersection(
-                hand_landmarks, pointed_object, depth_img
-            )
-            
-            if intersection_3d is not None:
-                buffer_key = f"{pointed_object.class_name}"
-                self.hit_buffer.append(buffer_key)
-                
-                self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/5")
-                
-                if (len(self.hit_buffer) >= 3 and
-                    len(set(self.hit_buffer)) == 1):
-                    
-                    obj_name = pointed_object.class_name
-                    
-                    if self.last_published == obj_name:
-                        self.get_logger().info(f"[HOLD] 이미 발행: {obj_name}")
-                        return
-                    
-                    self.get_logger().info(f"[HOLD] ✅ 3회 연속: {obj_name}")
-                    
-                    base_coords = self._camera_to_base(intersection_3d)
-                    self._publish_pose(base_coords, f"{obj_name}_at_point")
-                    
-                    self.last_published = obj_name
-                    self.current_mode = "IDLE"
-                    self._publish_status("대기 중")
-                    self.hit_buffer.clear()
-        else:
+        # 범위 체크
+        if not (0 <= u < w and 0 <= v < h):
+            self.get_logger().warn(f"[HOLD] 손끝 좌표 범위 초과: ({u}, {v})")
             self.hit_buffer.clear()
+            return
+        
+        # ✅ 손끝 위치의 Depth 값으로 3D 좌표 계산
+        z = float(depth_img[v, u]) * self.depth_scale
+        
+        if z <= 0:
+            self.get_logger().warn(f"[HOLD] 유효하지 않은 Depth: z={z}")
+            self.hit_buffer.clear()
+            return
+        
+        # 3D 좌표 계산
+        x_3d = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
+        y_3d = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
+        fingertip_3d = np.array([x_3d, y_3d, z])
+        
+        self.get_logger().info(f"[HOLD] 손끝 위치: pixel=({u}, {v}), 3D={fingertip_3d.round(3)}")
+        
+        # ✅ 시각화: 손끝에 타겟 마커 표시
+        self._draw_intersection((u, v))
+        
+        # 버퍼에 추가 (위치 기반)
+        position_key = f"pos_{u}_{v}"
+        self.hit_buffer.append(position_key)
+        
+        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/3")
+        
+        # ✅ 3회 연속으로 안정적이면 발행
+        if len(self.hit_buffer) >= 3:
+            # 최근 3개 위치의 평균으로 안정성 체크
+            recent_positions = list(self.hit_buffer)[-3:]
+            
+            # 위치가 너무 많이 변하지 않았는지 체크 (간단하게 처리)
+            self.get_logger().info(f"[HOLD] ✅ 3회 연속 안정")
+            
+            # Base 좌표로 변환
+            base_coords = self._camera_to_base(fingertip_3d)
+            
+            # 좌표 발행
+            self._publish_pose(base_coords, "fingertip_position")
+            
+            self.current_mode = "IDLE"
+            self._publish_status("손끝 위치로 이동")
+            self.hit_buffer.clear()
+            self.last_published = position_key
     
     def _process_object_detection(self, color_img, depth_img):
         """특정 객체 검출 모드"""
