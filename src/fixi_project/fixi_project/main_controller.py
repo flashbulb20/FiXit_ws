@@ -3,7 +3,6 @@ from rclpy.node import Node
 from std_msgs.msg import String, Float64MultiArray
 from geometry_msgs.msg import PoseStamped
 from enum import Enum
-import time
 
 class State(Enum):
     IDLE = 0
@@ -11,12 +10,13 @@ class State(Enum):
     SENSING = 2
     ACTION = 3
     FEEDBACK = 4
+    WAITING = 5  # ✅ 대기 상태 추가
 
 class MainController(Node):
     def __init__(self):
         super().__init__('main_controller')
         self.state = State.IDLE
-        self.get_logger().info('=== FiXiT Main Controller (Vertical Align & Delay) ===')
+        self.get_logger().info('=== Initializing Main Controller... ===')
 
         # --- Publishers ---
         self.voice_tts_pub = self.create_publisher(String, '/voice/tts', 10)
@@ -33,7 +33,7 @@ class MainController(Node):
         self.robot_status_sub = self.create_subscription(String, '/robot/status', self.robot_status_callback, 10)
 
         self.current_payload = ""
-        self.process_step = 0 
+        self.process_step = 0
         
         # 비전 좌표 임시 저장용
         self.target_vision_pose = None
@@ -41,14 +41,18 @@ class MainController(Node):
         # [설정] 물체를 놓을 위치 (Drop Zone) - Joint Angle
         self.drop_zone_joint = Float64MultiArray()
         self.drop_zone_joint.data = [5.784, 0.719, 86.65, -4.977, 51.269, 7.344]
+        
+        # ✅ Non-blocking delay를 위한 타이머
+        self.delay_timer = None
+        self.pending_action = None
 
     def voice_cmd_callback(self, msg):
         if self.state == State.IDLE:
             self.current_payload = msg.data.lower().strip()
-            self.get_logger().info(f"📥 Voice: {self.current_payload}")
+            self.get_logger().info(f"🔥 Voice: {self.current_payload}")
             self.state = State.LISTEN
             
-            if any(k in self.current_payload for k in ["fetch", "find", "get", "가져"]):
+            if any(k in self.current_payload for k in ["fetch", "find", "get", "가져", "track_hand"]):
                 self.start_sensing()
             elif "start" in self.current_payload or "home" in self.current_payload:
                 self.state = State.ACTION
@@ -59,14 +63,20 @@ class MainController(Node):
     def start_sensing(self):
         self.state = State.SENSING
         vision_msg = String()
+        
+        # ✅ fetch_xxx를 xxx로 변환해서 vision에 전달
         if "fetch_" in self.current_payload:
-            vision_msg.data = self.current_payload.replace("fetch_", "find_")
+            obj_name = self.current_payload.replace("fetch_", "")
+            vision_msg.data = obj_name  # "pcb", "flux" 등
+        elif "track_hand" in self.current_payload:
+            vision_msg.data = "track_hand"
         else:
             vision_msg.data = "find_object"
+        
+        self.get_logger().info(f"📷 Vision 명령: {vision_msg.data}")
         self.vision_cmd_pub.publish(vision_msg)
 
     def vision_pose_callback(self, msg):
-        """Step 0: 비전 좌표 수신 -> 수직 정렬(홈 이동) 먼저 수행"""
         if self.state == State.SENSING:
             self.get_logger().info("📍 [Step 0] 좌표 수신 완료. 수직 정렬을 위해 홈으로 이동합니다.")
             
@@ -74,13 +84,35 @@ class MainController(Node):
             self.target_vision_pose = msg
             
             self.state = State.ACTION
-            self.process_step = 0 # 0단계: 수직 정렬(Home)
+            self.process_step = 0  # 0단계: 수직 정렬(Home)
             
             # 로봇을 수직 상태(Home)로 리셋
             self.robot_nudge_pub.publish(String(data="START_TASK"))
 
+    def schedule_action(self, delay_sec, action_func):
+        """✅ Non-blocking delay 구현"""
+        self.state = State.WAITING
+        self.pending_action = action_func
+        self.delay_timer = self.create_timer(delay_sec, self.execute_pending_action)
+
+    def execute_pending_action(self):
+        """✅ 예약된 액션 실행"""
+        if self.delay_timer:
+            self.delay_timer.cancel()
+            self.delay_timer = None
+        
+        if self.pending_action:
+            self.pending_action()
+            self.pending_action = None
+        
+        self.state = State.ACTION
+
     def robot_status_callback(self, msg):
         status = msg.data
+        
+        # ✅ WAITING 상태일 때는 status 무시
+        if self.state == State.WAITING:
+            return
         
         if self.state == State.ACTION:
             # [Step 0 -> 1] 수직 정렬(홈) 완료 -> 저장된 좌표로 이동
@@ -92,7 +124,7 @@ class MainController(Node):
 
             # [Step 1 -> 2] 물체 위 도착 -> 하강
             elif self.process_step == 1 and status == "arrived_target":
-                self.get_logger().info("⬇️ [Step 2] 픽업 하강 (250mm)")
+                self.get_logger().info("⬇️ [Step 2] 픽업 하강 (150mm)")
                 self.process_step = 2
                 self.robot_nudge_pub.publish(String(data="DOWN_PICK"))
 
@@ -105,11 +137,13 @@ class MainController(Node):
             # [Step 3 -> 4] 잡기 완료 -> 1초 대기 -> 상승
             elif self.process_step == 3 and status == "gripper_closed":
                 self.get_logger().info("⏳ 잡았습니다. 1초 대기 중...")
-                time.sleep(1.0) # [추가] 1초 대기
                 
-                self.get_logger().info("⬆️ [Step 4] 픽업 상승 (150mm)")
-                self.process_step = 4
-                self.robot_nudge_pub.publish(String(data="UP_PICK"))
+                def continue_to_step4():
+                    self.get_logger().info("⬆️ [Step 4] 픽업 상승 (150mm)")
+                    self.process_step = 4
+                    self.robot_nudge_pub.publish(String(data="UP_PICK"))
+                
+                self.schedule_action(1.0, continue_to_step4)
 
             # [Step 4 -> 5] 상승 완료 -> Drop Zone 이동
             elif self.process_step == 4 and status == "arrived":
@@ -118,7 +152,7 @@ class MainController(Node):
                 self.robot_joint_pub.publish(self.drop_zone_joint)
 
             # [Step 5 -> 6] 이동 완료 -> 놓기
-            elif self.process_step == 5 and (status == "joint_arrived" or status == "jog_done"):
+            elif self.process_step == 5 and status == "joint_arrived":  # ✅ 수정됨!
                 self.get_logger().info("🖐️ [Step 6] 물체 놓기")
                 self.process_step = 6
                 self.robot_gripper_pub.publish(String(data="open"))
@@ -126,11 +160,13 @@ class MainController(Node):
             # [Step 6 -> 7] 놓기 완료 -> 1초 대기 -> 홈 복귀
             elif self.process_step == 6 and status == "gripper_opened":
                 self.get_logger().info("⏳ 놓았습니다. 1초 대기 중...")
-                time.sleep(1.0) # [추가] 1초 대기
-
-                self.get_logger().info("🏠 [Step 7] 작업 완료. 홈 위치로 복귀")
-                self.process_step = 7
-                self.robot_nudge_pub.publish(String(data="START_TASK"))
+                
+                def continue_to_step7():
+                    self.get_logger().info("🏠 [Step 7] 작업 완료. 홈 위치로 복귀")
+                    self.process_step = 7
+                    self.robot_nudge_pub.publish(String(data="START_TASK"))
+                
+                self.schedule_action(1.0, continue_to_step7)
 
             # [Finish] 홈 복귀 완료
             elif self.process_step == 7 and status == "arrived":
