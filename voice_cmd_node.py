@@ -49,7 +49,7 @@ class VisionPointingVoiceNode(Node):
         5. 기타: 로봇이 수행할 수 없는 일반 대화나 모호한 말은 'NONE'으로 처리하세요.
         6. 명확한 작업도구가 인식되지 않으면 문맥과 일치하는 명사를 제안하세요
         7. 작업 보조:
-            - "여기 잡아줘" -> hold 
+            - "여기 잡아줘" -> hold_here 
             - "잡아", "고정해" -> grab
             - "놔", "놔 줘" -> open
             - "위로/아래로/왼쪽/오른쪽" -> nudge_up, nudge_down, nudge_left, nudge_right
