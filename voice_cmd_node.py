@@ -137,8 +137,8 @@ class VisionPointingVoiceNode(Node):
             if payload == "NONE":
                 return "NONE"
 
-            self.display_and_speak(answer_msg)
             self.publish_cmd(payload)
+            self.display_and_speak(answer_msg)
             return "SUCCESS"
 
         except Exception as e:
