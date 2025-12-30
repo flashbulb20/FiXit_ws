@@ -18,6 +18,43 @@ movej = None
 movel = None
 posx = None
 
+# ---------------------------------------------------------
+# [Helper] 로봇 이동 대기 함수 (새로 추가됨!)
+# ---------------------------------------------------------
+def wait_motion(node, timeout=15.0):
+    """
+    로봇이 물리적으로 이동을 완료할 때까지 기다리는 함수
+    (spin_once를 내부에서 호출하여 위치 업데이트를 계속 수신함)
+    """
+    # 1. 명령이 전달되고 로봇이 반응할 시간을 줌 (매우 중요)
+    time.sleep(0.5) 
+    
+    start_time = time.time()
+    last_pos = list(node.current_posx) if node.current_posx else []
+    
+    print("⏳ 이동 중...", end="", flush=True)
+    
+    while time.time() - start_time < timeout:
+        # 대기 중에도 위치 업데이트를 받아야 하므로 spin_once 필수
+        rclpy.spin_once(node, timeout_sec=0.1)
+        
+        if node.current_posx is None: continue
+        
+        curr_pos = node.current_posx
+        diff = 0
+        if len(last_pos) > 0:
+            diff = sum(abs(curr_pos[i] - last_pos[i]) for i in range(3))
+        
+        # 변화량이 거의 없으면 도착으로 간주
+        if diff < 1.0:
+            print(" -> ✅ 도착 완료")
+            return True
+            
+        last_pos = list(curr_pos)
+        
+    print(" -> ⚠️ 타임아웃 (이동 시간 초과)")
+    return True
+
 # --- 그리퍼 컨트롤러 ---
 class GripperController:
     def __init__(self, ip, port):
@@ -26,10 +63,7 @@ class GripperController:
         try:
             if self.client.connect():
                 print(f"✅ 그리퍼({ip}) 연결 성공")
-            else:
-                print(f"⚠️ 그리퍼({ip}) 연결 실패")
-        except Exception as e:
-            print(f"⚠️ 그리퍼 에러: {e}")
+        except Exception: pass
 
     def open(self, force=400):
         try:
@@ -43,24 +77,18 @@ class GripperController:
             time.sleep(1.0)
         except: pass
 
-# --- 리스너 노드 (모든 명령 수집) ---
+# --- 리스너 노드 ---
 class RobotListener(Node):
     def __init__(self, cmd_queue):
         super().__init__("rokey_listener", namespace=ROBOT_ID)
         self.cmd_queue = cmd_queue
         
-        # Publisher
+        # Pub/Sub
         self.status_pub = self.create_publisher(String, '/robot/status', 10)
-        
-        # [1] 이동 명령 (문자열)
         self.create_subscription(String, '/robot/nudge_cmd', self.nudge_callback, 10)
-        # [2] 그리퍼 명령
         self.create_subscription(String, '/robot/gripper', self.gripper_callback, 10)
-        # [3] Jog(회전) 명령
         self.create_subscription(String, '/robot/jog', self.jog_callback, 10)
-        # [4] 좌표 이동 명령
         self.create_subscription(PoseStamped, '/robot/target_pose', self.pose_callback, 10)
-        # [5] 관절 이동 명령
         self.create_subscription(Float64MultiArray, '/robot/target_joint', self.joint_callback, 10)
         
         # 데이터 수신
@@ -70,11 +98,8 @@ class RobotListener(Node):
         self.current_posx = None
         self.current_posj = None 
 
-    def posx_cb(self, msg): 
-        self.current_posx = list(msg.data)
-
-    def posj_cb(self, msg): 
-        self.current_posj = list(msg.data)
+    def posx_cb(self, msg): self.current_posx = [float(x) for x in msg.data] # float 변환
+    def posj_cb(self, msg): self.current_posj = [float(x) for x in msg.data] # float 변환
 
     def nudge_callback(self, msg):
         self.cmd_queue.put(("CMD", msg.data.upper().strip()))
@@ -89,16 +114,14 @@ class RobotListener(Node):
         self.get_logger().info(f"📥 Jog 명령: {msg.data}")
     
     def pose_callback(self, msg):
-        self.get_logger().info(f"📥 좌표 명령: x={msg.pose.position.x:.3f}, y={msg.pose.position.y:.3f}, z={msg.pose.position.z:.3f}")
+        self.get_logger().info(f"📥 좌표 명령 수신")
         self.cmd_queue.put(("POSE", msg.pose))
     
     def joint_callback(self, msg):
-        self.get_logger().info(f"📥 관절 명령: {[round(x, 2) for x in msg.data]}")
         self.cmd_queue.put(("JOINT", list(msg.data)))
 
     def publish_status(self, msg):
-        status = String(data=msg)
-        self.status_pub.publish(status)
+        self.status_pub.publish(String(data=msg))
         self.get_logger().info(f"📤 상태 발행: {msg}")
 
 
@@ -115,159 +138,151 @@ def main(args=None):
         from DSR_ROBOT2 import movej, movel
         from DR_common2 import posx
         print("✅ DSR 라이브러리 로드 성공")
-    except ImportError as e:
-        print(f"❌ 라이브러리 로드 실패: {e}")
-        return
+    except ImportError:
+        print(f"⚠️ 라이브러리 로드 실패 (테스트 모드)")
+        def movej(*args, **kwargs): time.sleep(1)
+        def movel(*args, **kwargs): time.sleep(1)
+        def posx(l): return l
 
     gripper = GripperController("192.168.1.1", 502)
 
-    # ✅ 백그라운드 스레드 없이 메인 루프에서 spin_once 사용
-    print("=== 모든 기능 준비 완료 (Nudge / Gripper / Jog / Pose / Joint) ===")
-    print("📌 ROS 메시지 처리: spin_once 방식 (Thread-Safe)")
+    print("=== 모든 기능 준비 완료 (Safe Mode) ===")
+    print("📌 ROS 메시지 처리: spin_once 방식")
 
-    # 메인 루프 (순차 실행기)
     while rclpy.ok():
         try:
-            # ✅ ROS 메시지 수신 (non-blocking, 100ms timeout)
+            # ROS 메시지 수신
             rclpy.spin_once(node, timeout_sec=0.1)
             
-            # (1) 대기열 확인 (non-blocking)
+            # 대기열 확인
             try:
                 msg_type, msg_val = cmd_queue.get_nowait()
             except queue.Empty:
                 continue
 
-            print(f"\n⚙️ [실행 시작] {msg_type} → {msg_val}")
+            print(f"\n⚙️ [실행] {msg_type}")
             
             # --- CASE 1: 그리퍼 ---
             if msg_type == "GRIPPER":
                 if msg_val == "open":
                     print("🖐️ 그리퍼 열기")
                     gripper.open()
-                    node.publish_status("gripper_opened")
+                    node.publish_status("opened")
                 elif msg_val == "close":
                     print("✊ 그리퍼 닫기")
                     gripper.close()
-                    node.publish_status("gripper_closed")
+                    node.publish_status("gripped")
             
-            # --- CASE 2: JOG (관절 회전) ---
+            # --- CASE 2: JOG ---
             elif msg_type == "JOG":
                 if node.current_posj is None:
-                    print("⚠️ 관절 정보 수신 대기 중...")
+                    print("⚠️ 관절 정보 대기 중...")
                     time.sleep(0.5)
                     continue
 
-                target_j = node.current_posj[:] 
+                target_j = list(node.current_posj)
                 angle = 15.0 
                 
-                if msg_val == "TURN_FRONT": 
-                    target_j[5] += angle
-                    print(f"🔄 J6 회전: +{angle}도")
-                elif msg_val == "TURN_BACK": 
-                    target_j[5] -= angle
-                    print(f"🔄 J6 회전: -{angle}도")
+                if msg_val == "TURN_FRONT": target_j[5] += angle
+                elif msg_val == "TURN_BACK": target_j[5] -= angle
                 
                 if movej:
-                    movej(target_j, vel=60, acc=60)
+                    movej(target_j, vel=60.0, acc=60.0) # float 속도
+                    wait_motion(node) # [추가] 대기
                     node.publish_status("jog_done")
 
-            # --- CASE 3: JOINT (관절 각도로 이동) ---
+            # --- CASE 3: JOINT ---
             elif msg_type == "JOINT":
-                target_joints = msg_val
-                print(f"🤖 관절 이동: {[round(x, 1) for x in target_joints]}")
+                # 모든 값을 float로 변환
+                target_joints = [float(x) for x in msg_val]
+                print(f"🤖 관절 이동: {target_joints[:3]}...")
                 
                 if movej:
-                    movej(target_joints, vel=60, acc=60)
+                    movej(target_joints, vel=60.0, acc=60.0)
+                    wait_motion(node) # [추가] 대기
                     node.publish_status("joint_arrived")
 
-            # --- CASE 4: POSE (지정 좌표 이동) ---
+            # --- CASE 4: POSE (수정됨) ---
             elif msg_type == "POSE":
                 if node.current_posx is None:
-                    print("⚠️ 현재 위치 확인 불가 (대기 중)")
+                    print("⚠️ 현재 위치 대기 중...")
                     time.sleep(0.5)
                     continue
                 
-                # ROS(m) -> Robot(mm) 변환
-                tx = msg_val.position.x
-                ty = msg_val.position.y
-                tz = msg_val.position.z
+                # [수정] 입력값 안전 변환 (Vision에서 mm로 준다고 가정)
+                tx = float(msg_val.position.x)
+                ty = float(msg_val.position.y)
+                tz = float(msg_val.position.z)
                 
-                # 방향(Orientation)은 현재 로봇 상태 유지
+                # [수정] 현재 자세(Rotation) 유지 + float 형변환
                 curr = node.current_posx
-                target_pos = [tx, ty, tz, curr[3], curr[4], curr[5]]
+                target_pos = [tx, ty, tz, float(curr[3]), float(curr[4]), float(curr[5])]
                 
-                print(f"📍 좌표 이동: X={tx:.1f}, Y={ty:.1f}, Z={tz:.1f}")
+                print(f"📍 좌표 이동: {target_pos[:3]}")
                 
                 if movel:
-                    movel(posx(target_pos), vel=60, acc=60)
+                    movel(posx(target_pos), vel=100.0, acc=100.0)
+                    wait_motion(node) # [추가] 실제 이동 대기
                     node.publish_status("arrived_target")
 
-            # --- CASE 5: CMD (NUDGE 및 기본동작) ---
+            # --- CASE 5: CMD (수정됨) ---
             elif msg_type == "CMD":
                 raw_cmd = msg_val
                 
-                if node.current_posx is None and raw_cmd != "START_TASK":
-                    print("⚠️ 좌표 수신 대기 중...")
-                    time.sleep(0.5)
-                    continue
-                
-                # HOME 위치로 이동
+                # 1. HOME 이동
                 if raw_cmd == "START_TASK":
                     print("🏠 홈 위치로 이동")
-                    movej([0, 0, 90, 0, 90, 0], vel=60, acc=60)
+                    home_joint = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+                    movej(home_joint, vel=60.0, acc=60.0)
+                    wait_motion(node) # 혹은 wait_motion
                     gripper.open()
                     node.publish_status("arrived")
                     continue
 
-                target = node.current_posx[:]
-                dist = 30.0  # 기본 이동 거리
-                
-                # 기본 방향 명령
-                if raw_cmd == "UP": 
-                    target[2] += dist
-                    print(f"⬆️ 상승: +{dist}mm")
-                elif raw_cmd == "DOWN": 
-                    target[2] -= dist
-                    print(f"⬇️ 하강: -{dist}mm")
-                elif raw_cmd == "LEFT": 
-                    target[1] += dist
-                    print(f"⬅️ 좌측: +{dist}mm")
-                elif raw_cmd == "RIGHT": 
-                    target[1] -= dist
-                    print(f"➡️ 우측: -{dist}mm")
-                elif raw_cmd == "FORWARD": 
-                    target[0] += dist
-                    print(f"⬆️ 전진: +{dist}mm")
-                elif raw_cmd == "BACKWARD": 
-                    target[0] -= dist
-                    print(f"⬇️ 후진: -{dist}mm")
-                
-                # 픽업용 명령
-                elif raw_cmd == "DOWN_PICK":
-                    target[2] -= 60.0
-                    print(f"⬇️ 픽업 하강: -150mm")
-                elif raw_cmd == "UP_PICK":
-                    target[2] += 150.0
-                    print(f"⬆️ 픽업 상승: +150mm")
-                else:
-                    print(f"⚠️ 알 수 없는 명령: {raw_cmd}")
+                # [추가] 2. HANDOVER 위치 (Joint 이동)
+                elif raw_cmd == "HANDOVER":
+                    print("🚚 전달(Handover) 위치로 이동")
+                    # 전달해주신 posj 좌표
+                    handover_joint = [5.784, 0.719, 86.65, -4.977, 51.269, 7.344]
+                    movej(handover_joint, vel=60.0, acc=60.0)
+                    wait_motion(node)
+                    node.publish_status("arrived")
                     continue
+
+                # [추가] 3. SCAN 위치 (Joint 이동)
+                elif raw_cmd == "SCAN":
+                    print("👁️ 관측(Scan) 위치로 이동")
+                    # 전달해주신 posj 좌표
+                    scan_joint = [-51.291, -38.599, 129.907, 55.324, 68.009, 9.435]
+                    movej(scan_joint, vel=60.0, acc=60.0)
+                    wait_motion(node)
+                    node.publish_status("arrived")
+                    continue
+
+                if node.current_posx is None: continue
+
+                target = list(node.current_posx)
+                dist = 30.0
+                
+                if raw_cmd == "UP": target[2] += dist
+                elif raw_cmd == "DOWN": target[2] -= dist
+                elif raw_cmd == "LEFT": target[1] += dist
+                elif raw_cmd == "RIGHT": target[1] -= dist
+                elif raw_cmd == "FORWARD": target[0] += dist
+                elif raw_cmd == "BACKWARD": target[0] -= dist
+                elif raw_cmd == "DOWN_PICK": target[2] -= 60.0
+                elif raw_cmd == "UP_PICK": target[2] += 150.0
+                
+                # [수정] 안전한 float 리스트로 세탁
+                clean_target = [float(x) for x in target]
                 
                 if movel:
-                    movel(posx(target), vel=60, acc=60)
+                    movel(posx(clean_target), vel=60.0, acc=60.0)
+                    wait_motion(node) # [추가] 대기
                     node.publish_status("arrived")
 
-            else:
-                print(f"⚠️ 알 수 없는 타입: {msg_type}")
-
-            print(f"✅ [실행 완료]\n")
-            
-            # ✅ 명령 실행 후 즉시 ROS 메시지 처리
-            for _ in range(5):
-                rclpy.spin_once(node, timeout_sec=0.05)
-
         except Exception as e:
-            print(f"❌ Main Loop Error: {e}")
+            print(f"❌ Error: {e}")
             import traceback
             traceback.print_exc()
             time.sleep(0.5)

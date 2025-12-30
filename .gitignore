@@ -17,7 +17,7 @@ log/
 **/go_home.py
 **/move_robot.py
 **/ros_vision_node.py
-**/ros_yolo.py
+**/yolo_test.py
 **/yolo_finger.py
 
 **/.env

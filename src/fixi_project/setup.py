@@ -29,7 +29,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            "ros_yolo = fixi_project.ros_yolo:main",
+            "yolo_test = fixi_project.yolo_test:main",
             "move_robot = fixi_project.move_robot:main",
             "open_grip = fixi_project.open_grip:main",
             "close_grip = fixi_project.close_grip:main",

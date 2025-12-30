@@ -3,10 +3,13 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 from scipy.spatial.transform import Rotation
 import numpy as np
 import os
 from collections import deque
+import cv2
 
 from fixi_project.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
 
@@ -35,13 +38,34 @@ class CommandVisionNode(Node):
         self.gripper2cam = np.load(calibration_npy)
         self.get_logger().info(f"✓ 캘리브레이션 로드")
         
-        # 4. 물체-파트 매핑
-        self.object_to_part_mapping = {
-            'magnifier': 'mag_body',
-            'pcb': 'pcb',
-            'flux': 'flux',
-            'pump': 'pump',
+        # ✅ 4. 물체별 Offset 설정 (픽셀 단위)
+        # 돋보기는 이제 전체 실루엣이므로 손잡이 방향으로 Offset 적용
+        self.object_offsets = {
+            'magnifier': {
+                'pixel': (0, 60),      # 아래쪽으로 60픽셀 (손잡이 방향)
+                'description': '손잡이 위치',
+                'enabled': True
+            },
+            'pcb': {
+                'pixel': (0, 0),
+                'description': '중앙',
+                'enabled': False
+            },
+            'flux': {
+                'pixel': (0, 0),
+                'description': '중앙',
+                'enabled': False
+            },
+            'pump': {
+                'pixel': (0, 0),
+                'description': '중앙',
+                'enabled': False
+            }
         }
+        
+        # 5. ROS2 Image Publisher (시각화용)
+        self.bridge = CvBridge()
+        self.debug_image_pub = self.create_publisher(Image, '/vision/debug_image', 10)
         
         # 구독: 명령 수신
         self.cmd_sub = self.create_subscription(
@@ -55,31 +79,43 @@ class CommandVisionNode(Node):
         self.pose_pub = self.create_publisher(PoseStamped, '/vision/target_pose', 10)
         self.status_pub = self.create_publisher(String, '/vision/status', 10)
         
-        # 5. 상태 관리
-        self.current_mode = "IDLE"  # IDLE, OBJECT_DETECT, POINTING_DETECT, HOLD_POINT
+        # 6. 상태 관리
+        self.current_mode = "IDLE"
         self.target_object = None
-        self.target_part = None
-        self.hit_buffer = deque(maxlen=5)
+        self.hit_buffer = deque(maxlen=3)
         self.last_published = None
         
-        # 6. 메인 루프
+        # 7. 시각화 설정
+        self.enable_visualization = True
+        self.debug_frame = None
+        
+        # 8. 메인 루프
         self.create_timer(1/15.0, self.main_loop)
         
         self.get_logger().info("✓ Command Vision Node 준비 완료")
+        self.get_logger().info("  시각화: /vision/debug_image 토픽")
+        
+        # Offset이 활성화된 물체 출력
+        enabled_offsets = [obj for obj, cfg in self.object_offsets.items() if cfg['enabled']]
+        if enabled_offsets:
+            self.get_logger().info("  Offset 적용:")
+            for obj in enabled_offsets:
+                cfg = self.object_offsets[obj]
+                self.get_logger().info(f"    - {obj}: {cfg['description']} {cfg['pixel']}")
     
     def command_callback(self, msg: String):
         command = msg.data.strip().lower()
-        self.get_logger().info(f"명령 수신: '{command}'")
+        self.get_logger().info(f"[CMD] 명령 수신: '{command}'")
         self._parse_command(command)
     
     def _parse_command(self, command: str):
-        # ✅ 1. "여기 잡아줘" - 정확한 포인팅 위치
+        # 1. "여기 잡아줘"
         if any(word in command for word in ['여기', '잡아', 'hold', 'grab here', 'here']):
             self.current_mode = "HOLD_POINT"
             self.target_object = None
-            self.target_part = None
             self.hit_buffer.clear()
-            self.get_logger().info("모드: 정확한 위치 잡기 (광선-물체 교점)")
+            self.last_published = None
+            self.get_logger().info("[MODE] HOLD_POINT - 정확한 위치 잡기")
             self._publish_status("손가락으로 정확한 위치를 가리켜주세요")
             return
         
@@ -95,25 +131,18 @@ class CommandVisionNode(Node):
             if any(kw in command for kw in keywords):
                 self.current_mode = "OBJECT_DETECT"
                 self.target_object = obj_name
-                self.target_part = self.object_to_part_mapping.get(obj_name, obj_name)
-                
-                if self.target_object != self.target_part:
-                    self.get_logger().info(
-                        f"모드: 객체 검출 - '{self.target_object}' 요청 → '{self.target_part}' 찾기"
-                    )
-                else:
-                    self.get_logger().info(f"모드: 객체 검출 - '{self.target_object}' 찾기")
-                
+                self.last_published = None
+                self.get_logger().info(f"[MODE] OBJECT_DETECT - '{self.target_object}' 찾기")
                 self._publish_status(f"'{self.target_object}' 검색 중...")
                 return
         
-        # 3. 손가락 가리킴 (물체 중심)
+        # 3. 손가락 가리킴
         if command == "track_hand":
             self.current_mode = "POINTING_DETECT"
             self.target_object = None
-            self.target_part = None
             self.hit_buffer.clear()
-            self.get_logger().info("모드: 손가락 가리킴 검출 (물체 중심)")
+            self.last_published = None
+            self.get_logger().info("[MODE] POINTING_DETECT - 손가락 가리킴")
             self._publish_status("손가락으로 가리켜주세요")
             return
         
@@ -121,13 +150,12 @@ class CommandVisionNode(Node):
         if any(word in command for word in ['중지', '취소', '멈춰', 'stop', 'cancel']):
             self.current_mode = "IDLE"
             self.target_object = None
-            self.target_part = None
             self.hit_buffer.clear()
-            self.get_logger().info("모드: IDLE")
+            self.get_logger().info("[MODE] IDLE")
             self._publish_status("대기 중")
             return
         
-        self.get_logger().warn(f"인식할 수 없는 명령: '{command}'")
+        self.get_logger().warn(f"[CMD] 인식 불가: '{command}'")
         self._publish_status("명령을 인식할 수 없습니다")
     
     def main_loop(self):
@@ -142,6 +170,11 @@ class CommandVisionNode(Node):
         if color_img is None or depth_img is None:
             return
         
+        # 시각화용 프레임 복사
+        if self.enable_visualization:
+            self.debug_frame = color_img.copy()
+        
+        # 모드별 처리
         if self.current_mode == "OBJECT_DETECT":
             self._process_object_detection(color_img, depth_img)
             
@@ -150,227 +183,396 @@ class CommandVisionNode(Node):
         
         elif self.current_mode == "HOLD_POINT":
             self._process_hold_point(color_img, depth_img)
+        
+        # ROS2 이미지 발행
+        if self.enable_visualization and self.debug_frame is not None:
+            self._publish_debug_image()
+    
+    def _apply_offset(self, center_2d, obj_class_name):
+        """✅ 물체별 Offset 적용"""
+        
+        offset_config = self.object_offsets.get(obj_class_name.lower(), None)
+        
+        if offset_config is None or not offset_config['enabled']:
+            return center_2d
+        
+        # Offset 적용
+        x_offset, y_offset = offset_config['pixel']
+        adjusted_u = int(center_2d[0] + x_offset)
+        adjusted_v = int(center_2d[1] + y_offset)
+        
+        self.get_logger().info(
+            f"  Offset 적용: {obj_class_name} - "
+            f"원본({center_2d[0]}, {center_2d[1]}) → "
+            f"조정({adjusted_u}, {adjusted_v}) "
+            f"[{offset_config['description']}]"
+        )
+        
+        return (adjusted_u, adjusted_v)
+    
+    def _draw_detections(self, detections):
+        """YOLO 검출 결과 시각화"""
+        if self.debug_frame is None:
+            return
+        
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            
+            # 바운딩 박스
+            cv2.rectangle(self.debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            
+            # 클래스 이름
+            label = f"{det.class_name} {det.confidence:.2f}"
+            
+            # 배경 박스
+            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(self.debug_frame, (x1, y1-label_h-10), (x1+label_w, y1), (0, 255, 0), -1)
+            
+            # 텍스트
+            cv2.putText(self.debug_frame, label, (x1, y1-5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            
+            # 원본 중심점
+            cx, cy = det.center_2d
+            cv2.circle(self.debug_frame, (int(cx), int(cy)), 5, (0, 255, 0), -1)
+            
+            # ✅ Offset 적용된 위치도 표시
+            offset_config = self.object_offsets.get(det.class_name.lower(), None)
+            if offset_config and offset_config['enabled']:
+                adjusted_center = self._apply_offset(det.center_2d, det.class_name)
+                cv2.circle(self.debug_frame, adjusted_center, 7, (255, 0, 255), 2)  # 마젠타 원
+                cv2.line(self.debug_frame, (int(cx), int(cy)), adjusted_center, (255, 0, 255), 2)
+                cv2.putText(self.debug_frame, "GRIP", (adjusted_center[0]+10, adjusted_center[1]),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+    
+    def _draw_hand(self, hand_landmarks):
+        """손 랜드마크 시각화"""
+        if self.debug_frame is None or hand_landmarks is None:
+            return
+        
+        h, w, _ = self.debug_frame.shape
+        
+        try:
+            # ✅ fixi_project.vision_detector.HandLandmarks 구조
+            # 속성: fingertip_2d, fingertip_3d, pointing_ray, wrist_2d, wrist_3d
+            
+            # 손가락 끝 (INDEX_FINGER_TIP)
+            if hasattr(hand_landmarks, 'fingertip_2d'):
+                fingertip = hand_landmarks.fingertip_2d
+                
+                # fingertip이 튜플/리스트인지 확인
+                if isinstance(fingertip, (tuple, list)) and len(fingertip) >= 2:
+                    tip_x, tip_y = int(fingertip[0]), int(fingertip[1])
+                else:
+                    self.get_logger().warn(f"fingertip_2d format unknown: {type(fingertip)}")
+                    return
+            else:
+                self.get_logger().warn("HandLandmarks has no fingertip_2d attribute")
+                return
+            
+            # 손목 (WRIST) - MCP 대신 사용
+            if hasattr(hand_landmarks, 'wrist_2d'):
+                wrist = hand_landmarks.wrist_2d
+                
+                if isinstance(wrist, (tuple, list)) and len(wrist) >= 2:
+                    wrist_x, wrist_y = int(wrist[0]), int(wrist[1])
+                else:
+                    self.get_logger().warn(f"wrist_2d format unknown: {type(wrist)}")
+                    return
+            else:
+                self.get_logger().warn("HandLandmarks has no wrist_2d attribute")
+                return
+            
+            # 시각화
+            cv2.circle(self.debug_frame, (tip_x, tip_y), 10, (255, 0, 0), -1)
+            cv2.putText(self.debug_frame, "TIP", (tip_x+15, tip_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            
+            cv2.circle(self.debug_frame, (wrist_x, wrist_y), 10, (0, 0, 255), -1)
+            cv2.putText(self.debug_frame, "WRIST", (wrist_x+15, wrist_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            
+            cv2.line(self.debug_frame, (wrist_x, wrist_y), (tip_x, tip_y), (255, 255, 0), 3)
+            
+            # ✅ 손 깊이 표시 (hand_depth)
+            if hasattr(hand_landmarks, 'hand_depth') and hand_landmarks.hand_depth > 0:
+                depth_text = f"depth: {hand_landmarks.hand_depth:.3f}"
+                cv2.putText(self.debug_frame, depth_text, (wrist_x, wrist_y+30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(self.debug_frame, "(closer)", (wrist_x, wrist_y+50),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            # 광선 연장 - pointing_ray 속성 사용 가능하면 사용
+            if hasattr(hand_landmarks, 'pointing_ray') and hand_landmarks.pointing_ray is not None:
+                # pointing_ray를 직접 사용
+                ray = hand_landmarks.pointing_ray
+                if isinstance(ray, (tuple, list)) and len(ray) >= 2:
+                    # 정규화된 방향 벡터
+                    direction = np.array(ray[:2], dtype=float)
+                    if np.linalg.norm(direction) > 0:
+                        direction = direction / np.linalg.norm(direction)
+                        end_x = int(tip_x + direction[0] * 300)
+                        end_y = int(tip_y + direction[1] * 300)
+                        cv2.arrowedLine(self.debug_frame, (tip_x, tip_y), (end_x, end_y), 
+                                       (0, 255, 255), 3, tipLength=0.2)
+            else:
+                # pointing_ray가 없으면 fingertip - wrist로 계산
+                direction = np.array([tip_x - wrist_x, tip_y - wrist_y], dtype=float)
+                if np.linalg.norm(direction) > 0:
+                    direction = direction / np.linalg.norm(direction)
+                    end_x = int(tip_x + direction[0] * 300)
+                    end_y = int(tip_y + direction[1] * 300)
+                    cv2.arrowedLine(self.debug_frame, (tip_x, tip_y), (end_x, end_y), 
+                                   (0, 255, 255), 3, tipLength=0.2)
+                               
+        except Exception as e:
+            self.get_logger().error(f"손 시각화 실패: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+    
+    def _draw_intersection(self, intersection_2d):
+        """교점 시각화"""
+        if self.debug_frame is None or intersection_2d is None:
+            return
+        
+        x, y = intersection_2d
+        cv2.circle(self.debug_frame, (int(x), int(y)), 12, (0, 0, 255), 4)
+        cv2.circle(self.debug_frame, (int(x), int(y)), 6, (255, 255, 255), -1)
+        cv2.putText(self.debug_frame, "TARGET", (int(x)+20, int(y)),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    
+    def _draw_buffer_status(self):
+        """버퍼 상태 표시"""
+        if self.debug_frame is None:
+            return
+        
+        h, w, _ = self.debug_frame.shape
+        
+        # 반투명 배경
+        overlay = self.debug_frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 100), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, self.debug_frame, 0.5, 0, self.debug_frame)
+        
+        # 모드 표시
+        mode_color = {
+            "IDLE": (128, 128, 128),
+            "OBJECT_DETECT": (0, 255, 0),
+            "POINTING_DETECT": (255, 255, 0),
+            "HOLD_POINT": (255, 0, 255)
+        }
+        color = mode_color.get(self.current_mode, (255, 255, 255))
+        
+        cv2.putText(self.debug_frame, f"Mode: {self.current_mode}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        
+        # 타겟 표시
+        if self.target_object:
+            cv2.putText(self.debug_frame, f"Target: {self.target_object}", (10, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # 버퍼 상태
+        if len(self.hit_buffer) > 0:
+            buffer_text = f"Buffer: {len(self.hit_buffer)}/3"
+            cv2.putText(self.debug_frame, buffer_text, (10, 90),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            
+            # 프로그레스 바
+            bar_width = 200
+            bar_height = 20
+            filled = int(bar_width * len(self.hit_buffer) / 3)
+            cv2.rectangle(self.debug_frame, (250, 75), (250+bar_width, 75+bar_height), 
+                         (100, 100, 100), 2)
+            cv2.rectangle(self.debug_frame, (250, 75), (250+filled, 75+bar_height), 
+                         (0, 255, 0), -1)
+    
+    def _publish_debug_image(self):
+        """ROS2 Image 토픽으로 발행"""
+        if self.debug_frame is None:
+            return
+        
+        try:
+            self._draw_buffer_status()
+            img_msg = self.bridge.cv2_to_imgmsg(self.debug_frame, encoding="bgr8")
+            img_msg.header.stamp = self.get_clock().now().to_msg()
+            img_msg.header.frame_id = "camera"
+            self.debug_image_pub.publish(img_msg)
+        except Exception as e:
+            self.get_logger().error(f"이미지 발행 실패: {e}")
     
     def _calculate_ray_object_intersection(self, hand_landmarks, detection, depth_img):
-        """
-        ✅ 손가락 광선과 물체의 교점 계산
+        """손가락 광선과 물체의 교점 계산"""
         
-        Args:
-            hand_landmarks: MediaPipe 손 랜드마크
-            detection: YOLO 검출 결과 (바운딩 박스)
-            depth_img: Depth 이미지
-        
-        Returns:
-            intersection_3d: 교점의 3D 좌표 (카메라 좌표계)
-            intersection_2d: 교점의 2D 픽셀 좌표
-        """
-        
-        # 1. 손가락 끝 (index finger tip) 위치
         h, w = depth_img.shape
-        index_tip = hand_landmarks.landmark[8]  # INDEX_FINGER_TIP
-        tip_x = int(index_tip.x * w)
-        tip_y = int(index_tip.y * h)
         
-        # 2. 손가락 방향 벡터 (MCP → TIP)
-        index_mcp = hand_landmarks.landmark[5]  # INDEX_FINGER_MCP
-        mcp_x = int(index_mcp.x * w)
-        mcp_y = int(index_mcp.y * h)
-        
-        # 2D 방향 벡터
-        direction_2d = np.array([tip_x - mcp_x, tip_y - mcp_y], dtype=float)
-        direction_2d = direction_2d / np.linalg.norm(direction_2d)  # 정규화
-        
-        self.get_logger().info(f"  손가락 끝: ({tip_x}, {tip_y})")
-        self.get_logger().info(f"  방향 벡터: {direction_2d}")
-        
-        # 3. 물체 바운딩 박스
-        x1, y1, x2, y2 = detection.bbox
-        
-        # 4. 광선-박스 교점 찾기 (2D)
-        # 손가락 끝에서 방향으로 광선을 쏘면서 바운딩 박스와의 교점 찾기
-        max_distance = 1000  # 최대 검색 거리 (픽셀)
-        
-        for dist in range(0, max_distance, 2):  # 2픽셀씩 진행
-            # 광선 위의 점
-            ray_x = int(tip_x + direction_2d[0] * dist)
-            ray_y = int(tip_y + direction_2d[1] * dist)
+        try:
+            # ✅ fixi_project.vision_detector.HandLandmarks 구조
+            # 속성: fingertip_2d, fingertip_3d, pointing_ray, wrist_2d, wrist_3d
             
-            # 이미지 범위 체크
-            if ray_x < 0 or ray_x >= w or ray_y < 0 or ray_y >= h:
-                break
+            # 손가락 끝
+            if not hasattr(hand_landmarks, 'fingertip_2d'):
+                return None, None
             
-            # 바운딩 박스 내부인지 확인
-            if x1 <= ray_x <= x2 and y1 <= ray_y <= y2:
-                # 교점 발견!
-                self.get_logger().info(f"  ✓ 교점 발견: ({ray_x}, {ray_y}) at {dist}px")
+            fingertip = hand_landmarks.fingertip_2d
+            if not isinstance(fingertip, (tuple, list)) or len(fingertip) < 2:
+                return None, None
+            
+            tip_x, tip_y = int(fingertip[0]), int(fingertip[1])
+            
+            # 손목 (방향 계산용)
+            if not hasattr(hand_landmarks, 'wrist_2d'):
+                return None, None
+            
+            wrist = hand_landmarks.wrist_2d
+            if not isinstance(wrist, (tuple, list)) or len(wrist) < 2:
+                return None, None
+            
+            wrist_x, wrist_y = int(wrist[0]), int(wrist[1])
+            
+            # 방향 벡터 계산
+            direction_2d = np.array([tip_x - wrist_x, tip_y - wrist_y], dtype=float)
+            if np.linalg.norm(direction_2d) == 0:
+                return None, None
+            direction_2d = direction_2d / np.linalg.norm(direction_2d)
+            
+            self.get_logger().info(f"  손가락: ({tip_x}, {tip_y}) → {direction_2d}")
+            
+            x1, y1, x2, y2 = detection.bbox
+            max_distance = 1000
+            
+            for dist in range(0, max_distance, 2):
+                ray_x = int(tip_x + direction_2d[0] * dist)
+                ray_y = int(tip_y + direction_2d[1] * dist)
                 
-                # 5. 교점의 Depth 값 추출
-                z = float(depth_img[ray_y, ray_x]) * self.depth_scale
+                if ray_x < 0 or ray_x >= w or ray_y < 0 or ray_y >= h:
+                    break
                 
-                if z > 0:
-                    # 6. 3D 좌표 계산
-                    x_3d = (ray_x - self.intrinsics['ppx']) * z / self.intrinsics['fx']
-                    y_3d = (ray_y - self.intrinsics['ppy']) * z / self.intrinsics['fy']
-                    intersection_3d = np.array([x_3d, y_3d, z])
+                if x1 <= ray_x <= x2 and y1 <= ray_y <= y2:
+                    self.get_logger().info(f"  ✓ 교점: ({ray_x}, {ray_y}) at {dist}px")
                     
-                    return intersection_3d, (ray_x, ray_y)
-                else:
-                    self.get_logger().warn(f"  유효하지 않은 Depth: {z}")
-        
-        # 교점을 찾지 못한 경우 - 물체 중심 사용 (fallback)
-        self.get_logger().warn("  교점을 찾지 못함 - 물체 중심 사용")
-        center_2d = detection.center_2d
-        u, v = center_2d
-        
-        if 0 <= u < w and 0 <= v < h:
-            z = float(depth_img[v, u]) * self.depth_scale
-            if z > 0:
-                x_3d = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
-                y_3d = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
-                return np.array([x_3d, y_3d, z]), (u, v)
-        
-        return None, None
+                    z = float(depth_img[ray_y, ray_x]) * self.depth_scale
+                    
+                    if z > 0:
+                        x_3d = (ray_x - self.intrinsics['ppx']) * z / self.intrinsics['fx']
+                        y_3d = (ray_y - self.intrinsics['ppy']) * z / self.intrinsics['fy']
+                        intersection_3d = np.array([x_3d, y_3d, z])
+                        
+                        self._draw_intersection((ray_x, ray_y))
+                        
+                        return intersection_3d, (ray_x, ray_y)
+            
+            self.get_logger().warn("  교점 못 찾음 - 중심 사용")
+            center_2d = detection.center_2d
+            u, v = center_2d
+            
+            if 0 <= u < w and 0 <= v < h:
+                z = float(depth_img[v, u]) * self.depth_scale
+                if z > 0:
+                    x_3d = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
+                    y_3d = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
+                    return np.array([x_3d, y_3d, z]), (u, v)
+            
+            return None, None
+            
+        except Exception as e:
+            self.get_logger().error(f"교점 계산 실패: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            return None, None
     
     def _process_hold_point(self, color_img, depth_img):
-        """✅ '여기 잡아줘' 모드 - 정확한 포인팅 위치"""
+        """'여기 잡아줘' 모드"""
         
-        # 1. 물체 검출
         detections = self.object_detector.detect(color_img)
+        self._draw_detections(detections)
         
         if len(detections) == 0:
-            self.get_logger().debug("물체가 감지되지 않음")
             self.hit_buffer.clear()
             return
         
-        # 2. 손 검출
         hand_landmarks = self.hand_detector.detect(color_img)
         
+        # ✅ 손 깊이 정보 로그
+        if hand_landmarks is not None and hand_landmarks.hand_depth > 0:
+            self.get_logger().info(f"[HOLD] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
+        
+        self._draw_hand(hand_landmarks)
+        
         if hand_landmarks is None:
-            self.get_logger().debug("손이 감지되지 않음")
             self.hit_buffer.clear()
             return
         
-        # 3. 3D 정보 업데이트
         try:
             self.pointing_analyzer.update_3d_info(
-                hand_landmarks,
-                detections,
-                depth_img,
-                self.intrinsics,
-                self.depth_scale
+                hand_landmarks, detections, depth_img,
+                self.intrinsics, self.depth_scale
             )
         except Exception as e:
-            self.get_logger().error(f"3D 정보 업데이트 실패: {e}")
+            self.get_logger().error(f"[HOLD] 3D 업데이트 실패: {e}")
             return
         
-        # 4. 가리킨 물체 찾기 (기존 방식)
         pointed_object = self.pointing_analyzer.find_pointed_object(
-            hand_landmarks,
-            detections
+            hand_landmarks, detections
         )
         
         if pointed_object:
-            self.get_logger().info(f"👉 가리킨 물체: {pointed_object.class_name}")
+            self.get_logger().info(f"[HOLD] 👉 {pointed_object.class_name}")
             
-            # ✅ 5. 광선-물체 교점 계산
             intersection_3d, intersection_2d = self._calculate_ray_object_intersection(
-                hand_landmarks,
-                pointed_object,
-                depth_img
+                hand_landmarks, pointed_object, depth_img
             )
             
             if intersection_3d is not None:
-                self.get_logger().info(f"  교점 3D: {intersection_3d}")
-                
-                # 버퍼에 추가 (연속성 체크용)
-                buffer_key = f"{pointed_object.class_name}:{intersection_2d[0]},{intersection_2d[1]}"
+                buffer_key = f"{pointed_object.class_name}"
                 self.hit_buffer.append(buffer_key)
                 
-                # 5회 연속 같은 영역을 가리킴
-                if len(self.hit_buffer) >= 5:
-                    # 같은 물체를 가리키고 있는지만 확인 (위치는 약간 달라도 됨)
-                    pointed_classes = [key.split(':')[0] for key in self.hit_buffer]
+                self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/5")
+                
+                if (len(self.hit_buffer) >= 3 and
+                    len(set(self.hit_buffer)) == 1):
                     
-                    if len(set(pointed_classes)) == 1:  # 같은 물체
-                        self.get_logger().info(f"✅ 5회 연속 감지: {pointed_object.class_name}")
-                        
-                        # 베이스 좌표로 변환 및 발행
-                        base_coords = self._camera_to_base(intersection_3d)
-                        self._publish_pose(base_coords, f"{pointed_object.class_name}_at_point")
-                        
-                        self.last_published = pointed_object.class_name
-                        self.current_mode = "IDLE"
-                        self._publish_status("대기 중")
-                        self.hit_buffer.clear()
+                    obj_name = pointed_object.class_name
+                    
+                    if self.last_published == obj_name:
+                        self.get_logger().info(f"[HOLD] 이미 발행: {obj_name}")
+                        return
+                    
+                    self.get_logger().info(f"[HOLD] ✅ 3회 연속: {obj_name}")
+                    
+                    base_coords = self._camera_to_base(intersection_3d)
+                    self._publish_pose(base_coords, f"{obj_name}_at_point")
+                    
+                    self.last_published = obj_name
+                    self.current_mode = "IDLE"
+                    self._publish_status("대기 중")
+                    self.hit_buffer.clear()
         else:
             self.hit_buffer.clear()
-    
-    def _find_associated_part(self, detections, main_object_detection, part_name):
-        """메인 물체 근처에서 파트 찾기"""
-        main_center = main_object_detection.center_2d
-        main_x, main_y = main_center
-        
-        candidates = []
-        for det in detections:
-            if part_name.lower() in det.class_name.lower():
-                part_center = det.center_2d
-                part_x, part_y = part_center
-                distance = np.sqrt((main_x - part_x)**2 + (main_y - part_y)**2)
-                candidates.append((det, distance))
-        
-        if not candidates:
-            return None
-        
-        candidates.sort(key=lambda x: x[1])
-        closest_part, dist = candidates[0]
-        
-        self.get_logger().info(
-            f"  연관 파트 발견: {closest_part.class_name} (거리: {dist:.1f}px)"
-        )
-        
-        return closest_part
     
     def _process_object_detection(self, color_img, depth_img):
         """특정 객체 검출 모드"""
         
         detections = self.object_detector.detect(color_img)
+        self._draw_detections(detections)
         
         target_detection = None
         for det in detections:
-            if self.target_part.lower() in det.class_name.lower():
+            if self.target_object.lower() in det.class_name.lower():
                 target_detection = det
-                self.get_logger().info(f"✓ '{self.target_part}' 직접 발견!")
+                self.get_logger().info(f"[OBJ] ✓ '{self.target_object}' 발견")
                 break
         
-        if target_detection is None and self.target_object != self.target_part:
-            main_detection = None
-            for det in detections:
-                if self.target_object.lower() in det.class_name.lower():
-                    main_detection = det
-                    break
-            
-            if main_detection:
-                self.get_logger().info(f"✓ '{self.target_object}' 발견! 연관 파트 찾는 중...")
-                target_detection = self._find_associated_part(
-                    detections, 
-                    main_detection, 
-                    self.target_part
-                )
-                
-                if target_detection is None:
-                    self.get_logger().warn(
-                        f"'{self.target_object}'는 보이지만 '{self.target_part}'를 찾을 수 없습니다"
-                    )
-                    return
-        
         if target_detection is None:
-            self.get_logger().debug(f"'{self.target_part}' 찾는 중...")
+            self.get_logger().debug(f"[OBJ] '{self.target_object}' 찾는 중...")
             return
         
-        self.get_logger().info(f"✓ 최종 목표: {target_detection.class_name}")
+        self.get_logger().info(f"[OBJ] 최종: {target_detection.class_name}")
         
-        center_2d = target_detection.center_2d
-        u, v = center_2d
+        # ✅ Offset 적용
+        center_2d_original = target_detection.center_2d
+        center_2d_adjusted = self._apply_offset(center_2d_original, target_detection.class_name)
+        
+        u, v = center_2d_adjusted
         
         if 0 <= u < depth_img.shape[1] and 0 <= v < depth_img.shape[0]:
             z = float(depth_img[v, u]) * self.depth_scale
@@ -381,17 +583,20 @@ class CommandVisionNode(Node):
                 camera_coords = np.array([x, y, z])
                 
                 base_coords = self._camera_to_base(camera_coords)
-                
-                object_name = self.target_object if self.target_object else target_detection.class_name
-                self._publish_pose(base_coords, object_name)
+                self._publish_pose(base_coords, target_detection.class_name)
                 
                 self.current_mode = "IDLE"
                 self._publish_status("대기 중")
+            else:
+                self.get_logger().warn(f"유효하지 않은 Depth: z={z}")
+        else:
+            self.get_logger().warn(f"좌표 범위 초과: u={u}, v={v}")
     
     def _process_pointing_detection(self, color_img, depth_img):
-        """손가락 가리킴 검출 모드 (물체 중심)"""
+        """손가락 가리킴 검출 모드"""
         
         detections = self.object_detector.detect(color_img)
+        self._draw_detections(detections)
         
         if len(detections) == 0:
             self.hit_buffer.clear()
@@ -399,41 +604,69 @@ class CommandVisionNode(Node):
         
         hand_landmarks = self.hand_detector.detect(color_img)
         
+        # ✅ 손 깊이 정보 로그
+        if hand_landmarks is not None and hand_landmarks.hand_depth > 0:
+            self.get_logger().info(f"[POINT] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
+        
+        self._draw_hand(hand_landmarks)
+        
         if hand_landmarks is None:
             self.hit_buffer.clear()
             return
         
         try:
             self.pointing_analyzer.update_3d_info(
-                hand_landmarks,
-                detections,
-                depth_img,
-                self.intrinsics,
-                self.depth_scale
+                hand_landmarks, detections, depth_img,
+                self.intrinsics, self.depth_scale
             )
         except Exception as e:
-            self.get_logger().error(f"3D 정보 업데이트 실패: {e}")
+            self.get_logger().error(f"[POINT] 3D 업데이트 실패: {e}")
             return
         
         pointed_object = self.pointing_analyzer.find_pointed_object(
-            hand_landmarks,
-            detections
+            hand_landmarks, detections
         )
         
         if pointed_object:
-            self.get_logger().info(f"가리킴: {pointed_object.class_name}")
-            self.hit_buffer.append(pointed_object.class_name)
+            self.get_logger().info(f"[POINT] 👉 {pointed_object.class_name}")
             
-            if (len(self.hit_buffer) >= 5 and
-                len(set(self.hit_buffer)) == 1 and
-                self.last_published != pointed_object.class_name):
-                
-                base_coords = self._camera_to_base(pointed_object.center_3d)
-                self._publish_pose(base_coords, pointed_object.class_name)
-                
-                self.last_published = pointed_object.class_name
-                self.current_mode = "IDLE"
-                self._publish_status("대기 중")
+            # ✅ Offset 적용
+            center_2d_adjusted = self._apply_offset(
+                pointed_object.center_2d, 
+                pointed_object.class_name
+            )
+            
+            # 조정된 2D 좌표로 3D 재계산
+            u, v = center_2d_adjusted
+            if 0 <= u < depth_img.shape[1] and 0 <= v < depth_img.shape[0]:
+                z = float(depth_img[v, u]) * self.depth_scale
+                if z > 0:
+                    x = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
+                    y = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
+                    camera_coords_adjusted = np.array([x, y, z])
+                    
+                    self.hit_buffer.append(pointed_object.class_name)
+                    
+                    self.get_logger().info(f"[POINT] 버퍼: {len(self.hit_buffer)}/5")
+                    
+                    if (len(self.hit_buffer) >= 3 and
+                        len(set(self.hit_buffer)) == 1):
+                        
+                        obj_name = pointed_object.class_name
+                        
+                        if self.last_published == obj_name:
+                            self.get_logger().info(f"[POINT] 이미 발행: {obj_name}")
+                            return
+                        
+                        self.get_logger().info(f"[POINT] ✅ 3회 연속: {obj_name}")
+                        
+                        base_coords = self._camera_to_base(camera_coords_adjusted)
+                        self._publish_pose(base_coords, obj_name)
+                        
+                        self.last_published = obj_name
+                        self.current_mode = "IDLE"
+                        self._publish_status("대기 중")
+                        self.hit_buffer.clear()
         else:
             self.hit_buffer.clear()
     
@@ -454,6 +687,7 @@ class CommandVisionNode(Node):
         return base_coord
     
     def _publish_pose(self, position, object_name):
+        """좌표 발행"""
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "base"
@@ -463,7 +697,13 @@ class CommandVisionNode(Node):
         msg.pose.orientation.w = 1.0
         
         self.pose_pub.publish(msg)
-        self.get_logger().info(f"✓ 발행: {object_name} at {position.round(1)}")
+        
+        self.get_logger().info("=" * 60)
+        self.get_logger().info(f"[PUBLISH] ✓ 좌표 발행!")
+        self.get_logger().info(f"[PUBLISH]   Object: {object_name}")
+        self.get_logger().info(f"[PUBLISH]   Position: {position.round(3)}")
+        self.get_logger().info("=" * 60)
+        
         self._publish_status(f"{object_name} 검출 완료")
     
     def _publish_status(self, message):
@@ -485,11 +725,8 @@ def main(args=None):
     rclpy.init(args=args)
     
     print("\n" + "="*50)
-    print("  Command-based Vision Node (Ray Intersection)")
+    print("  Command-based Vision Node (Simplified)")
     print("="*50)
-    
-    print("모드: 프로덕션 (실제 로봇)")
-    print("="*50 + "\n")
     
     robot_node = rclpy.create_node("vision_interface_node", namespace=ROBOT_ID)
     DR_init.__dsr__node = robot_node
@@ -541,11 +778,9 @@ def main(args=None):
     executor.add_node(img_node)
     
     print("\n구독: /vision/cmd")
-    print("발행: /vision/target_pose, /vision/status")
-    print("\n지원 명령:")
-    print("  - '여기 잡아줘': 손가락 광선과 물체의 교점")
-    print("  - 'track_hand': 물체 중심점")
-    print("  - '돋보기 가져와': 특정 물체 검출\n")
+    print("발행: /vision/target_pose, /vision/status, /vision/debug_image")
+    print("\n시각화:")
+    print("  rqt_image_view /vision/debug_image\n")
     
     try:
         executor.spin()
