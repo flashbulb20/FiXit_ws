@@ -9,9 +9,9 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from voice_control.MicController import MicController, MicConfig      # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
-from voice_control.wakeup_word import WakeupWord                      # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
-from voice_control.STT import STT                                     # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
+from fixi_project.MicController import MicController, MicConfig      
+from fixi_project.wakeup_word import WakeupWord                      
+from fixi_project.STT import STT                                     
 
 load_dotenv(dotenv_path=os.path.join(".env"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -44,7 +44,7 @@ class VisionPointingVoiceNode(Node):
         [토픽 생성 규칙]
         1. 손으로 가리키는 뉘앙스가 있다면 무조건 'track_hand'를 출력하세요.
         2. 이 모델은 전자기기 수리 보조기능을 담당합니다. 사용자의 모든 언어를 전자기기 수리와 관련된 언어로 인식하세요.
-        3. 작업도구에는 pcb, 플럭스(flux), 전선, 돋보기, 납 흡입기, 인두기가 있습니다. 흡입기라는 단어는 pump로 출력하세요.
+        3. 작업도구에는 pcb, 플럭스(flux), 전선, 돋보기, 납 흡입기, 인두기가 있습니다. 흡입기는 pump로 출력하세요.
         4. 작업도구 종류의 리스트를 알려달라거나 어떤 도구들이 있는지 알려달라는 명령이 들어오면 'tool_list'를 출력하세요
         5. 종료 요청: 사용자가 작업을 끝내려 하면 'program_finish'를 출력하세요.
         6. 기타: 로봇이 수행할 수 없는 일반 대화나 모호한 말은 'NONE'으로 처리하세요.
