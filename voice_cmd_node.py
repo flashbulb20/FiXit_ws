@@ -52,8 +52,10 @@ class VisionPointingVoiceNode(Node):
             - "여기 잡아줘" -> hold_here 
             - "잡아", "고정해" -> grab
             - "놔", "놔 줘" -> open
-            - "위로/아래로/왼쪽/오른쪽" -> nudge_up, nudge_down, nudge_left, nudge_right
+            - "위로/아래로/왼쪽/오른쪽/앞으로/뒤로" -> nudge_up, nudge_down, nudge_left, nudge_right, nudge_forward, nudge_backward
             - "돌아가", "집으로", "복귀" -> go_home 
+            - "앞으로 회전", "앞으로 돌려" -> turn_front
+            - "뒤로 회전", "뒤로 돌려" -> turn_back 
         8. 물체 이름 매핑: 사용자가 부르는 용어가 달라도 표준 영어 단어를 사용하여 'fetch_단어' 형태로 만드세요. 단 2번에 괄호가 붙어있는 단어는 그 괄호의 영어로 출력하세요.
         9. 사용자가 사용하는 언어를 자동으로 감지하세요.
         10. 응답 메시지('msg')는 반드시 사용자가 말한 것과 동일한 언어로 작성하세요.
