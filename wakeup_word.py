@@ -4,7 +4,7 @@ import openwakeword
 from openwakeword.model import Model
 from scipy.signal import resample
 from ament_index_python.packages import get_package_share_directory
-from voice_control import MicController
+from fixi_project import MicController
 
 MODEL_NAME = "hello_rokey_8332_32.tflite"
 
@@ -12,7 +12,7 @@ MODEL_NAME = "hello_rokey_8332_32.tflite"
 class WakeupWord:
     def __init__(self, buffer_size):
         openwakeword.utils.download_models()
-        package_share_dir = get_package_share_directory('voice_control')    # 여기서 각자 src폴더 이름에 맞게 변경하세요
+        package_share_dir = get_package_share_directory('fixi_project')    
         self.model_path = os.path.join(package_share_dir, 'models', MODEL_NAME)
         self.model = None
         self.model_name = MODEL_NAME.split(".", maxsplit=1)[0]
