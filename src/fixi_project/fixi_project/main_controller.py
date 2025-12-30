@@ -92,7 +92,7 @@ class MainController(Node):
             threading.Thread(target=self.sequence_fetch, args=(target,)).start()
 
         # 4. 잡아주기 (Hold)
-        elif action == "hold" or action == "grab":
+        elif action == "hold":
             if "pcb" in target:
                 self.target_type = "PCB"
                 threading.Thread(target=self.sequence_hold_pcb).start()
@@ -113,6 +113,13 @@ class MainController(Node):
                 self.robot_gripper_pub.publish(String(data="close"))
                 self.tts_pub.publish(String(data="잡았습니다."))
             
+            self.state = "IDLE"
+
+        # 6. 놓기 (Release/Drop)
+        elif action in ["release", "drop", "open", "put", "let", "놔", "놓아", "풀어"]:
+            self.get_logger().info("🔓 Action: Release (Open Gripper)")
+            self.robot_gripper_pub.publish(String(data="open"))
+            self.tts_pub.publish(String(data="물건을 놓습니다."))
             self.state = "IDLE"
 
     # =========================================================

@@ -18,6 +18,7 @@ setup(
             glob('calibration/*.npy') + glob('calibration/*.json')),
         ('share/' + package_name + '/models', ['fixi_project/hello_rokey_8332_32.tflite']),
         ('share/' + package_name, ['fixi_project/.env']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
