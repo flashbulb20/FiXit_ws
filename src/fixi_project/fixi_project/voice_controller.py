@@ -123,11 +123,6 @@ class VisionPointingVoiceNode(Node):
             res_dict = json.loads(response.choices[0].message.content)
             payload = res_dict.get("payload", "NONE")
             answer_msg = res_dict.get("msg", "무엇을 도와드릴까요?")
-
-            if payload == "program_finish":
-                self.display_and_speak(answer_msg)
-                self.publish_cmd(payload)
-                return "program_finish"
             
             if payload == "standby":
                 return "standby"
