@@ -6,6 +6,10 @@ import time
 import threading
 import math
 
+# [추가됨] 로봇 모드 변경을 위한 서비스 타입 임포트
+# (빌드 환경에 dsr_msgs2 패키지가 있어야 합니다)
+from dsr_msgs2.srv import SetRobotMode
+
 class MainController(Node):
     def __init__(self):
         super().__init__('main_controller')
@@ -19,11 +23,14 @@ class MainController(Node):
         self.create_subscription(PoseStamped, '/vision/target_pose', self.vision_pose_callback, 10)
 
         self.robot_pose_pub = self.create_publisher(PoseStamped, '/robot/target_pose', 10)
-        self.robot_nudge_pub = self.create_publisher(String, '/robot/nudge_cmd', 10) # 이제 이걸로 명령
+        self.robot_nudge_pub = self.create_publisher(String, '/robot/nudge_cmd', 10) 
         self.robot_jog_pub = self.create_publisher(String, '/robot/jog', 10)
         self.robot_gripper_pub = self.create_publisher(String, '/robot/gripper', 10)
         self.vision_cmd_pub = self.create_publisher(String, '/vision/cmd', 10)
         self.tts_pub = self.create_publisher(String, '/voice/tts', 10)
+
+        # [추가됨] 로봇 모드 변경 서비스 클라이언트 (수동/자동)
+        self.mode_client = self.create_client(SetRobotMode, '/dsr01/system/set_robot_mode')
 
         # =========================================================
         # 2. 상태 및 변수 초기화
@@ -38,6 +45,13 @@ class MainController(Node):
     # =========================================================
     def robot_status_callback(self, msg):
         self.latest_robot_status = msg.data
+        
+        # 충돌 감지 로직
+        if "fail" in msg.data and "collision" in msg.data:
+            if self.state != "COLLISION":
+                self.state = "COLLISION"
+                self.get_logger().error(f"💥 충돌 감지됨! (Status: {msg.data}) - '복구'라고 말해주세요.")
+                self.tts_pub.publish(String(data="충돌이 감지되었습니다. 복구 명령을 내려주세요."))
 
     def vision_pose_callback(self, msg):
         self.detected_pose = msg
@@ -52,6 +66,24 @@ class MainController(Node):
             self.stop_all()
             return
         
+        # [충돌 복구 시나리오]
+        if command == "recovery" or "복구" in command:
+            self.get_logger().info("🚑 Action: Recovery Mode Initiated")
+            self.robot_nudge_pub.publish(String(data="recovery"))
+            self.tts_pub.publish(String(data="복구 모드를 시작합니다. 직접 로봇을 움직여주세요."))
+            self.state = "IDLE" 
+            return
+
+        # [추가됨] 수동 모드 / 자동 모드 변경 (Service Call)
+        if "manual" in command or "수동" in command:
+            # Mode 0: Manual
+            threading.Thread(target=self.change_robot_mode, args=(0,)).start()
+            return
+        elif "auto" in command or "자동" in command:
+            # Mode 1: Automatic
+            threading.Thread(target=self.change_robot_mode, args=(1,)).start()
+            return
+
         if command == "go_home" or command == "home":
             self.get_logger().info("🏠 Action: Go Home")
             self.robot_nudge_pub.publish(String(data="START_TASK"))
@@ -124,7 +156,51 @@ class MainController(Node):
             self.state = "IDLE"
 
     # =========================================================
-    # 4. 시퀀스 로직 (Wait 함수 - 부분 일치 확인)
+    # 4. 서비스 호출 함수 (NEW)
+    # =========================================================
+    def change_robot_mode(self, mode_int):
+        """
+        로봇 모드 변경 서비스 호출
+        mode_int: 0 (Manual), 1 (Auto)
+        """
+        mode_str = "수동(Manual)" if mode_int == 0 else "자동(Auto)"
+        self.get_logger().info(f"⚙️ Requesting Robot Mode Change to: {mode_str}")
+        self.tts_pub.publish(String(data=f"{mode_str} 모드로 변경합니다."))
+
+        # 서비스 서버 대기
+        if not self.mode_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().error("❌ Service not available: /dsr01/system/set_robot_mode")
+            self.tts_pub.publish(String(data="모드 변경 서비스를 찾을 수 없습니다."))
+            return
+
+        # 요청 생성
+        req = SetRobotMode.Request()
+        req.robot_mode = mode_int
+
+        # 비동기 호출 (Thread 내부이므로 call() 사용 시 데드락 위험 -> call_async 권장하지만 
+        # 여기서는 스레드 분리 상태이므로 Future 대기로 처리)
+        future = self.mode_client.call_async(req)
+        
+        # 결과 기다리기 (간단한 타임아웃 루프)
+        start_time = time.time()
+        while not future.done():
+            time.sleep(0.1)
+            if time.time() - start_time > 3.0:
+                self.get_logger().error("❌ Service Call Timeout")
+                return
+
+        try:
+            response = future.result()
+            if response.success:
+                self.get_logger().info(f"✅ Mode Changed Successfully to {mode_str}")
+                self.tts_pub.publish(String(data="모드가 변경되었습니다."))
+            else:
+                self.get_logger().warn(f"⚠️ Mode Change Failed. Robot might be busy.")
+        except Exception as e:
+            self.get_logger().error(f"❌ Service call failed: {e}")
+
+    # =========================================================
+    # 5. 시퀀스 로직 (Wait 함수 - 부분 일치 확인)
     # =========================================================
     def wait_for_robot(self, target_status, timeout=10.0):
         self.latest_robot_status = ""
@@ -135,6 +211,9 @@ class MainController(Node):
             if target_status in self.latest_robot_status:
                 self.get_logger().info(f"✅ Robot Reached: '{self.latest_robot_status}'")
                 return True
+            if "fail" in self.latest_robot_status:
+                self.get_logger().warn(f"❌ Robot Failed during wait: {self.latest_robot_status}")
+                return False
             time.sleep(0.1)
         
         self.get_logger().error(f"❌ Robot Timeout! Waited for '{target_status}'")
@@ -165,13 +244,13 @@ class MainController(Node):
             self.state = "IDLE"
             return
         
-        # Z축 오프셋 (실제 환경에 맞춰 수정)
+        # Z축 오프셋
         if tool_name == "flux": target_pose.pose.position.z -= 50
         elif tool_name == "pump": target_pose.pose.position.z -= 20
         elif tool_name == "magnifier": target_pose.pose.position.z -= 30
         elif tool_name == "pcb": target_pose.pose.position.z -= 25
 
-        # 2. 로봇 이동 (Vision 좌표)
+        # 2. 로봇 이동
         self.get_logger().info("🚀 Moving Robot to Target...")
         self.robot_pose_pub.publish(target_pose)
         if not self.wait_for_robot("arrived"): return 
@@ -183,7 +262,7 @@ class MainController(Node):
 
         time.sleep(0.5)
 
-        # 4. Handover 이동 (명령어 사용)
+        # 4. Handover 이동
         self.get_logger().info("🚚 Moving to Handover Position...")
         self.robot_nudge_pub.publish(String(data="HANDOVER")) 
         if not self.wait_for_robot("arrived"): return
@@ -200,7 +279,7 @@ class MainController(Node):
         self.get_logger().info("--- [START] Sequence Hold PCB ---")
         self.tts_pub.publish(String(data="파지 준비 중입니다."))
 
-        # 1. 대기 위치 이동 (명령어 사용)
+        # 1. 대기 위치 이동
         self.robot_nudge_pub.publish(String(data="HANDOVER"))
         if not self.wait_for_robot("arrived"): return
 
@@ -211,12 +290,11 @@ class MainController(Node):
         self.state = "WAITING_FOR_CATCH"
         self.get_logger().info("💤 State changed to WAITING_FOR_CATCH")
 
-    # --- [C. 돋보기 확대 (Magnify)] - [NEW!] ---
+    # --- [C. 돋보기 확대 (Magnify)] ---
     def sequence_magnify(self):
         self.state = "MAGNIFYING"
         self.get_logger().info("--- [START] Sequence Magnify ---")
         
-        # 1. 돋보기 가져오기 (Fetch 로직 일부 차용하지만 놓지 않음)
         self.tts_pub.publish(String(data="돋보기를 가져옵니다."))
         
         # [탐색]
@@ -227,7 +305,7 @@ class MainController(Node):
             self.state = "IDLE"
             return
         
-        # [접근] (Offset 적용)
+        # [접근]
         target_pose.pose.position.z -= 30 
         self.robot_pose_pub.publish(target_pose)
         if not self.wait_for_robot("arrived"): return
@@ -245,15 +323,11 @@ class MainController(Node):
         self.tts_pub.publish(String(data="확대할 곳을 손으로 가리켜주세요."))
         self.vision_cmd_pub.publish(String(data="track_hand"))
         
-        # 손 찾기 대기 (시간 넉넉히)
         hand_pose = self.wait_for_vision(timeout=15.0) 
         if not hand_pose:
             self.tts_pub.publish(String(data="손을 못 찾았습니다."))
             self.state = "IDLE"
             return
-        
-        # 4. 손 위치로 접근 (확대)
-        # hand_pose.pose.position.z += 100
         
         self.get_logger().info("🔍 Zooming in (Approaching Hand)...")
         self.robot_pose_pub.publish(hand_pose)
@@ -270,7 +344,6 @@ class MainController(Node):
         self.get_logger().info("--- [START] Sequence Hold Point (Here) ---")
         self.tts_pub.publish(String(data="손을 보여주세요."))
 
-        # 1. 관측 위치 이동 (명령어 사용)
         self.robot_nudge_pub.publish(String(data="SCAN"))
         if not self.wait_for_robot("arrived"): return
 
