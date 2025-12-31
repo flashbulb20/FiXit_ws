@@ -163,6 +163,18 @@ class MainController(Node):
             self.tts_pub.publish(String(data="물건을 찾을 수 없습니다."))
             self.state = "IDLE"
             return
+        
+        if tool_name == "flux":
+            target_pose.pose.position.z -= 50
+        
+        elif tool_name == "pump":
+            target_pose.pose.position.z -= 20
+
+        elif tool_name == "magnifier":
+            target_pose.pose.position.z -= 30
+
+        elif tool_name == "pcb":
+            target_pose.pose.position.z -= 25
 
         # 2. 로봇 이동 (Vision 좌표)
         self.get_logger().info("🚀 Moving Robot to Target...")

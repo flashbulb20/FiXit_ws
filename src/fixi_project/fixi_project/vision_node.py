@@ -447,10 +447,10 @@ class CommandVisionNode(Node):
         except Exception as e:
             self.get_logger().error(f"이미지 발행 실패: {e}")
     
-    def _calculate_ray_object_intersection(self, hand_landmarks, detection, depth_img):       
+    def _calculate_ray_object_intersection(self, hand_landmarks, detection, depth_img):
         h, w = depth_img.shape
         
-        try:            
+        try:
             # 손가락 끝
             if not hasattr(hand_landmarks, 'fingertip_2d'):
                 return None, None
@@ -570,30 +570,48 @@ class CommandVisionNode(Node):
         # ✅ 시각화: 손끝에 타겟 마커 표시
         self._draw_intersection((u, v))
         
-        # 버퍼에 추가 (위치 기반)
-        position_key = f"pos_{u}_{v}"
-        self.hit_buffer.append(position_key)
+        # ✅ 버퍼에 추가 (3D 좌표 저장)
+        self.hit_buffer.append(fingertip_3d.copy())
         
-        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/3")
+        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/5")
         
-        # ✅ 3회 연속으로 안정적이면 발행
-        if len(self.hit_buffer) >= 3:
-            # 최근 3개 위치의 평균으로 안정성 체크
-            recent_positions = list(self.hit_buffer)[-3:]
+        # ✅ 5회 연속으로 안정적이면 발행
+        if len(self.hit_buffer) >= 5:
+            # 최근 5개 위치의 안정성 체크
+            recent_positions = list(self.hit_buffer)[-5:]
+            recent_array = np.array(recent_positions)  # shape: (5, 3)
             
-            # 위치가 너무 많이 변하지 않았는지 체크 (간단하게 처리)
-            self.get_logger().info(f"[HOLD] ✅ 3회 연속 안정")
+            # 위치 변화량 계산 (표준편차)
+            std_dev = np.std(recent_array, axis=0)  # [x_std, y_std, z_std]
+            max_std = np.max(std_dev)  # 최대 표준편차
             
-            # Base 좌표로 변환
-            base_coords = self._camera_to_base(fingertip_3d)
+            # 안정성 기준: 최대 표준편차가 5mm 이하
+            stability_threshold = 5.0  # mm
             
-            # 좌표 발행
-            self._publish_pose(base_coords, "fingertip_position")
-            
-            self.current_mode = "IDLE"
-            self._publish_status("손끝 위치로 이동")
-            self.hit_buffer.clear()
-            self.last_published = position_key
+            if max_std < stability_threshold:
+                # 안정적 → 평균 위치 사용
+                avg_position = np.mean(recent_array, axis=0)
+                
+                self.get_logger().info(
+                    f"[HOLD] ✅ 안정 (std: {max_std:.2f}mm < {stability_threshold}mm)"
+                )
+                self.get_logger().info(f"[HOLD] 평균 3D: {avg_position.round(3)}")
+                
+                # Base 좌표로 변환 (평균 위치 사용)
+                base_coords = self._camera_to_base(avg_position)
+                
+                # 좌표 발행
+                self._publish_pose(base_coords, "fingertip_position")
+                
+                self.current_mode = "IDLE"
+                self._publish_status("손끝 위치로 이동")
+                self.hit_buffer.clear()
+                self.last_published = f"pos_{u}_{v}"
+            else:
+                # 불안정 → 계속 대기
+                self.get_logger().info(
+                    f"[HOLD] ⏳ 불안정 (std: {max_std:.2f}mm > {stability_threshold}mm)"
+                )
     
     def _process_object_detection(self, color_img, depth_img):
         detections = self.object_detector.detect(color_img)
