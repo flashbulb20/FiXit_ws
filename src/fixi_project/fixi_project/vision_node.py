@@ -163,14 +163,14 @@ class CommandVisionNode(Node):
         self._parse_command(command)
     
     def _parse_command(self, command: str):
-        # 1. "여기 잡아줘"
-        if any(word in command for word in ['여기', '잡아', 'hold', 'grab here', 'here']):
-            self.current_mode = "HOLD_POINT"
+        # 1. 손가락 가리킴
+        if command == "track_hand":
+            self.current_mode = "FINGER_POINTING"
             self.target_object = None
             self.hit_buffer.clear()
             self.last_published = None
-            self.get_logger().info("[MODE] HOLD_POINT - 정확한 위치 잡기")
-            self._publish_status("손가락으로 정확한 위치를 가리켜주세요")
+            self.get_logger().info("[MODE] FINGER_POINTING - 손가락 가리킴")
+            self._publish_status("손가락으로 가리켜주세요")
             return
         
         # 2. 특정 객체 검출
@@ -189,16 +189,16 @@ class CommandVisionNode(Node):
                 self.get_logger().info(f"[MODE] OBJECT_DETECT - '{self.target_object}' 찾기")
                 self._publish_status(f"'{self.target_object}' 검색 중...")
                 return
-        
-        # 3. 손가락 가리킴
-        if command == "track_hand":
-            self.current_mode = "HOLD_POINT"
-            self.target_object = None
-            self.hit_buffer.clear()
-            self.last_published = None
-            self.get_logger().info("[MODE] HOLD_POINT - 손가락 가리킴")
-            self._publish_status("손가락으로 가리켜주세요")
-            return
+            
+        # 3. "이거 가져다줘"
+        # if any(word in command for word in ['이거', '저거', 'this', 'that', 'fetch this', 'fetch that']):
+        #     self.current_mode = "FETCH_THIS"
+        #     self.target_object = None
+        #     self.hit_buffer.clear()
+        #     self.last_published = None
+        #     self.get_logger().info("[MODE] FETCH_THIS - 가리키는 물체 파지")
+        #     self._publish_status("손가락으로 정확한 물체를 가리켜주세요")
+        #     return
         
         # 4. 중지
         if any(word in command for word in ['중지', '취소', '멈춰', 'stop', 'cancel']):
@@ -231,12 +231,12 @@ class CommandVisionNode(Node):
         # 모드별 처리
         if self.current_mode == "OBJECT_DETECT":
             self._process_object_detection(color_img, depth_img)
-            
-        elif self.current_mode == "POINTING_DETECT":
-            self._process_pointing_detection(color_img, depth_img)
         
         elif self.current_mode == "HOLD_POINT":
             self._process_hold_point(color_img, depth_img)
+
+        # elif self.current_mode == "POINTING_DETECT":
+        #     self._process_pointing_detection(color_img, depth_img)
         
         # ROS2 이미지 발행
         if self.enable_visualization and self.debug_frame is not None:
@@ -570,48 +570,30 @@ class CommandVisionNode(Node):
         # ✅ 시각화: 손끝에 타겟 마커 표시
         self._draw_intersection((u, v))
         
-        # ✅ 버퍼에 추가 (3D 좌표 저장)
-        self.hit_buffer.append(fingertip_3d.copy())
+        # 버퍼에 추가 (위치 기반)
+        position_key = f"pos_{u}_{v}"
+        self.hit_buffer.append(position_key)
         
-        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/5")
+        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/3")
         
-        # ✅ 5회 연속으로 안정적이면 발행
-        if len(self.hit_buffer) >= 5:
-            # 최근 5개 위치의 안정성 체크
-            recent_positions = list(self.hit_buffer)[-5:]
-            recent_array = np.array(recent_positions)  # shape: (5, 3)
+        # ✅ 3회 연속으로 안정적이면 발행
+        if len(self.hit_buffer) >= 3:
+            # 최근 3개 위치의 평균으로 안정성 체크
+            recent_positions = list(self.hit_buffer)[-3:]
             
-            # 위치 변화량 계산 (표준편차)
-            std_dev = np.std(recent_array, axis=0)  # [x_std, y_std, z_std]
-            max_std = np.max(std_dev)  # 최대 표준편차
+            # 위치가 너무 많이 변하지 않았는지 체크 (간단하게 처리)
+            self.get_logger().info(f"[HOLD] ✅ 3회 연속 안정")
             
-            # 안정성 기준: 최대 표준편차가 5mm 이하
-            stability_threshold = 5.0  # mm
+            # Base 좌표로 변환
+            base_coords = self._camera_to_base(fingertip_3d)
             
-            if max_std < stability_threshold:
-                # 안정적 → 평균 위치 사용
-                avg_position = np.mean(recent_array, axis=0)
-                
-                self.get_logger().info(
-                    f"[HOLD] ✅ 안정 (std: {max_std:.2f}mm < {stability_threshold}mm)"
-                )
-                self.get_logger().info(f"[HOLD] 평균 3D: {avg_position.round(3)}")
-                
-                # Base 좌표로 변환 (평균 위치 사용)
-                base_coords = self._camera_to_base(avg_position)
-                
-                # 좌표 발행
-                self._publish_pose(base_coords, "fingertip_position")
-                
-                self.current_mode = "IDLE"
-                self._publish_status("손끝 위치로 이동")
-                self.hit_buffer.clear()
-                self.last_published = f"pos_{u}_{v}"
-            else:
-                # 불안정 → 계속 대기
-                self.get_logger().info(
-                    f"[HOLD] ⏳ 불안정 (std: {max_std:.2f}mm > {stability_threshold}mm)"
-                )
+            # 좌표 발행
+            self._publish_pose(base_coords, "fingertip_position")
+            
+            self.current_mode = "IDLE"
+            self._publish_status("손끝 위치로 이동")
+            self.hit_buffer.clear()
+            self.last_published = position_key
     
     def _process_object_detection(self, color_img, depth_img):
         detections = self.object_detector.detect(color_img)
