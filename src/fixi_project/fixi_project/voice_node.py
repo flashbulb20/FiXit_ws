@@ -9,9 +9,9 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from fixi_project.MicController import MicController, MicConfig      # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
-from fixi_project.wakeup_word import WakeupWord                      # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
-from fixi_project.STT import STT                                     # 본인이 작업하는 src파일 이름으로 바꾸세요 (from ~~)
+from fixi_project.MicController import MicController, MicConfig      
+from fixi_project.wakeup_word import WakeupWord                      
+from fixi_project.STT import STT                                     
 
 load_dotenv(dotenv_path=os.path.join(".env"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -33,7 +33,7 @@ class VisionPointingVoiceNode(Node):
         
         pygame.mixer.init()
         self.system_prompt = """
-        당신은 Doosan M0609 로봇 팔과 TurtleBot4의 지능형 통역사입니다. 
+        당신은 Doosan M0609 로봇 팔의 지능형 통역사입니다. 
         사용자의 한국어 요청을 로봇이 이해할 수 있는 '영어 토픽 명칭'으로 변환하세요.
 
         [연속 대화 규칙]
@@ -43,19 +43,24 @@ class VisionPointingVoiceNode(Node):
 
         [토픽 생성 규칙]
         1. 이 모델은 전자기기 수리 보조기능을 담당합니다. 사용자의 모든 언어를 전자기기 수리와 관련된 언어로 인식하세요.
-        2. 작업도구에는 pcb, 플럭스(flux), 전선, 돋보기(magnifier), 납 흡입기(pump), 인두기가 있습니다.
+        2. 작업도구에는 기판(pcb), 플럭스(flux), 전선, 돋보기(magnifier), 납 흡입기(pump), 인두기가 있습니다.
         3. 작업도구 종류의 리스트를 알려달라거나 어떤 도구들이 있는지 알려달라는 명령이 들어오면 'tool_list'를 출력하세요
-        4. 종료 요청: 사용자가 작업을 끝내려 하면 'program_finish'를 출력하세요.
-        5. 기타: 로봇이 수행할 수 없는 일반 대화나 모호한 말은 'NONE'으로 처리하세요.
-        6. 명확한 작업도구가 인식되지 않으면 문맥과 일치하는 명사를 제안하세요
-        7. 작업 보조:
+        4. 기타: 로봇이 수행할 수 없는 일반 대화나 모호한 말은 'NONE'으로 처리하세요.
+        5. 명확한 작업도구가 인식되지 않으면 문맥과 일치하는 명사를 제안하세요
+        6. 작업 보조:
+            - "pcb 잡아줘", "기판 잡아줘" -> hold_pcb
             - "여기 잡아줘" -> hold_here 
-            - "잡아", "고정해" -> grab
-            - "놔", "놔 줘" -> open
-            - "위로/아래로/왼쪽/오른쪽" -> nudge_up, nudge_down, nudge_left, nudge_right
-        8. 물체 이름 매핑: 사용자가 부르는 용어가 달라도 표준 영어 단어를 사용하여 'fetch_단어' 형태로 만드세요. 단 2번에 괄호가 붙어있는 단어는 그 괄호의 영어로 출력하세요.
-        9. 사용자가 사용하는 언어를 자동으로 감지하세요.
-        10. 응답 메시지('msg')는 반드시 사용자가 말한 것과 동일한 언어로 작성하세요.
+            - "잡아", "고정해", "닫아" -> grab
+            - "놔", "놔 줘", "열어" -> open
+            - "위로/아래로/왼쪽/오른쪽/앞으로/뒤로" -> nudge_up, nudge_down, nudge_left, nudge_right, nudge_forward, nudge_backward
+            - "돌아가", "집으로", "복귀" -> go_home 
+            - "앞으로 회전", "앞으로 돌려" -> turn_front
+            - "뒤로 회전", "뒤로 돌려" -> turn_back 
+            - "도구 가져와", "도구 줘" -> fetch_도구이름, bring_도구이름
+            - "확대해줘", "여기 확대해줘" -> zoom_here, magnify_here
+        7. 물체 이름 매핑: 사용자가 부르는 용어가 달라도 표준 영어 단어를 사용하여 'action_target' 형태로 만드세요. 단 2번에 괄호가 붙어있는 단어는 그 괄호의 영어로 출력하세요.
+        8. 사용자가 사용하는 언어를 자동으로 감지하세요.
+        9. 응답 메시지('msg')는 반드시 사용자가 말한 것과 동일한 언어로 작성하세요.
 
         응답은 반드시 JSON 형식이어야 합니다: {"payload": "생성된_토픽", "msg": "로봇의 응답 멘트"}
         """
@@ -163,10 +168,8 @@ class VisionPointingVoiceNode(Node):
                         if res.text:
                             self.get_logger().info(f"사용자: {res.text}")
                             result = self.handle_intelligence(res.text)
-                            
-                            if result == "program_finish": 
-                                return 
-                            elif result == "standby":
+     
+                            if result == "standby":
                                 break 
                     rclpy.spin_once(self, timeout_sec=0)
         finally:

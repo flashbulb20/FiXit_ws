@@ -103,7 +103,7 @@ class MainController(Node):
                 pass
 
         # 5. 파지 트리거 (Catch)
-        elif (action == "catch" or action == "grab") and self.state == "WAITING_FOR_CATCH":
+        elif (action == "grab"):
             self.get_logger().info("🔒 Catch Trigger 확인!")
             
             if self.target_type == "PCB":
