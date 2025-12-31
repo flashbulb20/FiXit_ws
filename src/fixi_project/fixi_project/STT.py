@@ -22,7 +22,7 @@ class STT:
     def __init__(self, openai_api_key):
         self.client = OpenAI(api_key=openai_api_key)
         # self.openai_api_key = openai_api_key
-        self.duration = 5  # seconds
+        self.duration = 3  # seconds
         self.samplerate = 16000  # Whisper는 16kHz를 선호
 
     def speech2text(self):

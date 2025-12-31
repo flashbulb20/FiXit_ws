@@ -192,11 +192,11 @@ class CommandVisionNode(Node):
         
         # 3. 손가락 가리킴
         if command == "track_hand":
-            self.current_mode = "POINTING_DETECT"
+            self.current_mode = "HOLD_POINT"
             self.target_object = None
             self.hit_buffer.clear()
             self.last_published = None
-            self.get_logger().info("[MODE] POINTING_DETECT - 손가락 가리킴")
+            self.get_logger().info("[MODE] HOLD_POINT - 손가락 가리킴")
             self._publish_status("손가락으로 가리켜주세요")
             return
         
