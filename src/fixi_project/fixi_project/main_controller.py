@@ -33,9 +33,6 @@ class MainController(Node):
         self.state = "IDLE"
         self.target_type = "TOOL"
 
-        # [수정] 좌표 설정 제거 (Robot Node에서 posj로 처리)
-        # 이제 Main은 좌표를 몰라도 됩니다. "명령어"만 보냅니다.
-
     # =========================================================
     # 3. 콜백 함수
     # =========================================================
@@ -115,7 +112,11 @@ class MainController(Node):
             
             self.state = "IDLE"
 
-        # 6. 놓기 (Release/Drop)
+        # 6. 확대하기 (Magnify)
+        elif action == "magnify" or action == "zoom" or "확대" in command or "돋보기" in command:
+             threading.Thread(target=self.sequence_magnify).start()
+
+        # 7. 놓기 (Release/Drop)
         elif action in ["release", "drop", "open", "put", "let", "놔", "놓아", "풀어"]:
             self.get_logger().info("🔓 Action: Release (Open Gripper)")
             self.robot_gripper_pub.publish(String(data="open"))
@@ -164,17 +165,11 @@ class MainController(Node):
             self.state = "IDLE"
             return
         
-        if tool_name == "flux":
-            target_pose.pose.position.z -= 50
-        
-        elif tool_name == "pump":
-            target_pose.pose.position.z -= 20
-
-        elif tool_name == "magnifier":
-            target_pose.pose.position.z -= 30
-
-        elif tool_name == "pcb":
-            target_pose.pose.position.z -= 25
+        # Z축 오프셋 (실제 환경에 맞춰 수정)
+        if tool_name == "flux": target_pose.pose.position.z -= 50
+        elif tool_name == "pump": target_pose.pose.position.z -= 20
+        elif tool_name == "magnifier": target_pose.pose.position.z -= 30
+        elif tool_name == "pcb": target_pose.pose.position.z -= 25
 
         # 2. 로봇 이동 (Vision 좌표)
         self.get_logger().info("🚀 Moving Robot to Target...")
@@ -182,16 +177,14 @@ class MainController(Node):
         if not self.wait_for_robot("arrived"): return 
 
         # 3. 잡기
-        grip_cmd = "close"
-        self.get_logger().info(f"✊ Gripping ({grip_cmd})...")
-        self.robot_gripper_pub.publish(String(data=grip_cmd))
+        self.get_logger().info("✊ Gripping...")
+        self.robot_gripper_pub.publish(String(data="close"))
         if not self.wait_for_robot("gripped"): return
 
         time.sleep(0.5)
 
-        # 4. Handover 이동 (수정됨: 명령어로 변경)
+        # 4. Handover 이동 (명령어 사용)
         self.get_logger().info("🚚 Moving to Handover Position...")
-        # 좌표값 대신 명령어를 보냅니다.
         self.robot_nudge_pub.publish(String(data="HANDOVER")) 
         if not self.wait_for_robot("arrived"): return
 
@@ -207,7 +200,7 @@ class MainController(Node):
         self.get_logger().info("--- [START] Sequence Hold PCB ---")
         self.tts_pub.publish(String(data="파지 준비 중입니다."))
 
-        # 1. 대기 위치 이동 (수정됨: 명령어로 변경)
+        # 1. 대기 위치 이동 (명령어 사용)
         self.robot_nudge_pub.publish(String(data="HANDOVER"))
         if not self.wait_for_robot("arrived"): return
 
@@ -218,13 +211,66 @@ class MainController(Node):
         self.state = "WAITING_FOR_CATCH"
         self.get_logger().info("💤 State changed to WAITING_FOR_CATCH")
 
+    # --- [C. 돋보기 확대 (Magnify)] - [NEW!] ---
+    def sequence_magnify(self):
+        self.state = "MAGNIFYING"
+        self.get_logger().info("--- [START] Sequence Magnify ---")
+        
+        # 1. 돋보기 가져오기 (Fetch 로직 일부 차용하지만 놓지 않음)
+        self.tts_pub.publish(String(data="돋보기를 가져옵니다."))
+        
+        # [탐색]
+        self.vision_cmd_pub.publish(String(data="find_magnifier"))
+        target_pose = self.wait_for_vision()
+        if not target_pose: 
+            self.tts_pub.publish(String(data="돋보기를 못 찾았습니다."))
+            self.state = "IDLE"
+            return
+        
+        # [접근] (Offset 적용)
+        target_pose.pose.position.z -= 30 
+        self.robot_pose_pub.publish(target_pose)
+        if not self.wait_for_robot("arrived"): return
+
+        # [파지]
+        self.robot_gripper_pub.publish(String(data="close"))
+        if not self.wait_for_robot("gripped"): return
+
+        # 2. 관측 위치(SCAN)로 이동
+        self.get_logger().info("🔭 Moving to Scan Position...")
+        self.robot_nudge_pub.publish(String(data="SCAN"))
+        if not self.wait_for_robot("arrived"): return
+
+        # 3. 손 추적
+        self.tts_pub.publish(String(data="확대할 곳을 손으로 가리켜주세요."))
+        self.vision_cmd_pub.publish(String(data="track_hand"))
+        
+        # 손 찾기 대기 (시간 넉넉히)
+        hand_pose = self.wait_for_vision(timeout=15.0) 
+        if not hand_pose:
+            self.tts_pub.publish(String(data="손을 못 찾았습니다."))
+            self.state = "IDLE"
+            return
+        
+        # 4. 손 위치로 접근 (확대)
+        # hand_pose.pose.position.z += 100
+        
+        self.get_logger().info("🔍 Zooming in (Approaching Hand)...")
+        self.robot_pose_pub.publish(hand_pose)
+        if not self.wait_for_robot("arrived"): return
+
+        self.tts_pub.publish(String(data="확대했습니다."))
+        self.get_logger().info("--- [END] Sequence Magnify Complete ---")
+        self.state = "IDLE"
+
+
     # --- [D. 가리킨 곳 잡아주기] ---
     def sequence_hold_point(self):
         self.state = "SCANNING"
         self.get_logger().info("--- [START] Sequence Hold Point (Here) ---")
         self.tts_pub.publish(String(data="손을 보여주세요."))
 
-        # 1. 관측 위치 이동 (수정됨: 명령어로 변경)
+        # 1. 관측 위치 이동 (명령어 사용)
         self.robot_nudge_pub.publish(String(data="SCAN"))
         if not self.wait_for_robot("arrived"): return
 
