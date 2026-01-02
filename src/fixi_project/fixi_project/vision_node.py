@@ -11,7 +11,7 @@ import os
 from collections import deque
 import cv2
 
-from fixi_project.vision_detector import ObjectDetector, HandDetector, PointingAnalyzer
+from fixi_project.vision_detector import ObjectDetector, HandDetector
 
 import DR_init
 
@@ -32,14 +32,12 @@ class CommandVisionNode(Node):
         # 2. CV 모듈 초기화
         self.object_detector = ObjectDetector(yolo_model_path, conf_threshold=0.6)
         self.hand_detector = HandDetector()
-        self.pointing_analyzer = PointingAnalyzer(distance_threshold=50.0)
         
         # 3. 캘리브레이션
         self.gripper2cam = np.load(calibration_npy)
         self.get_logger().info(f"✓ 캘리브레이션 로드")
         
         # ✅ 4. 물체별 Offset 설정 (픽셀 단위)
-        # 돋보기는 이제 전체 실루엣이므로 손잡이 방향으로 Offset 적용
         self.object_offsets = {
             'magnifier': {
                 'pixel': (0, 60),      # 아래쪽으로 60픽셀 (손잡이 방향)
@@ -189,18 +187,8 @@ class CommandVisionNode(Node):
                 self.get_logger().info(f"[MODE] OBJECT_DETECT - '{self.target_object}' 찾기")
                 self._publish_status(f"'{self.target_object}' 검색 중...")
                 return
-            
-        # 3. "이거 가져다줘"
-        # if any(word in command for word in ['이거', '저거', 'this', 'that', 'fetch this', 'fetch that']):
-        #     self.current_mode = "FETCH_THIS"
-        #     self.target_object = None
-        #     self.hit_buffer.clear()
-        #     self.last_published = None
-        #     self.get_logger().info("[MODE] FETCH_THIS - 가리키는 물체 파지")
-        #     self._publish_status("손가락으로 정확한 물체를 가리켜주세요")
-        #     return
-        
-        # 4. 중지
+             
+        # 3. 중지
         if any(word in command for word in ['중지', '취소', '멈춰', 'stop', 'cancel']):
             self.current_mode = "IDLE"
             self.target_object = None
@@ -232,11 +220,8 @@ class CommandVisionNode(Node):
         if self.current_mode == "OBJECT_DETECT":
             self._process_object_detection(color_img, depth_img)
         
-        elif self.current_mode == "HOLD_POINT":
-            self._process_hold_point(color_img, depth_img)
-
-        # elif self.current_mode == "POINTING_DETECT":
-        #     self._process_pointing_detection(color_img, depth_img)
+        elif self.current_mode == "FINGER_POINTING":
+            self._process_finger_pointing(color_img, depth_img)
         
         # ROS2 이미지 발행
         if self.enable_visualization and self.debug_frame is not None:
@@ -406,8 +391,7 @@ class CommandVisionNode(Node):
         mode_color = {
             "IDLE": (128, 128, 128),
             "OBJECT_DETECT": (0, 255, 0),
-            "POINTING_DETECT": (255, 255, 0),
-            "HOLD_POINT": (255, 0, 255)
+            "FINGER_POINTING": (255, 165, 0)
         }
         color = mode_color.get(self.current_mode, (255, 255, 255))
         
@@ -447,99 +431,28 @@ class CommandVisionNode(Node):
         except Exception as e:
             self.get_logger().error(f"이미지 발행 실패: {e}")
     
-    def _calculate_ray_object_intersection(self, hand_landmarks, detection, depth_img):
-        h, w = depth_img.shape
-        
-        try:
-            # 손가락 끝
-            if not hasattr(hand_landmarks, 'fingertip_2d'):
-                return None, None
-            
-            fingertip = hand_landmarks.fingertip_2d
-            if not isinstance(fingertip, (tuple, list)) or len(fingertip) < 2:
-                return None, None
-            
-            tip_x, tip_y = int(fingertip[0]), int(fingertip[1])
-            
-            # 손목 (방향 계산용)
-            if not hasattr(hand_landmarks, 'wrist_2d'):
-                return None, None
-            
-            wrist = hand_landmarks.wrist_2d
-            if not isinstance(wrist, (tuple, list)) or len(wrist) < 2:
-                return None, None
-            
-            wrist_x, wrist_y = int(wrist[0]), int(wrist[1])
-            
-            # 방향 벡터 계산
-            direction_2d = np.array([tip_x - wrist_x, tip_y - wrist_y], dtype=float)
-            if np.linalg.norm(direction_2d) == 0:
-                return None, None
-            direction_2d = direction_2d / np.linalg.norm(direction_2d)
-            
-            self.get_logger().info(f"  손가락: ({tip_x}, {tip_y}) → {direction_2d}")
-            
-            x1, y1, x2, y2 = detection.bbox
-            max_distance = 1000
-            
-            for dist in range(0, max_distance, 2):
-                ray_x = int(tip_x + direction_2d[0] * dist)
-                ray_y = int(tip_y + direction_2d[1] * dist)
-                
-                if ray_x < 0 or ray_x >= w or ray_y < 0 or ray_y >= h:
-                    break
-                
-                if x1 <= ray_x <= x2 and y1 <= ray_y <= y2:
-                    self.get_logger().info(f"  ✓ 교점: ({ray_x}, {ray_y}) at {dist}px")
-                    
-                    z = float(depth_img[ray_y, ray_x]) * self.depth_scale
-                    
-                    if z > 0:
-                        x_3d = (ray_x - self.intrinsics['ppx']) * z / self.intrinsics['fx']
-                        y_3d = (ray_y - self.intrinsics['ppy']) * z / self.intrinsics['fy']
-                        intersection_3d = np.array([x_3d, y_3d, z])
-                        
-                        self._draw_intersection((ray_x, ray_y))
-                        
-                        return intersection_3d, (ray_x, ray_y)
-            
-            self.get_logger().warn("  교점 못 찾음 - 중심 사용")
-            center_2d = detection.center_2d
-            u, v = center_2d
-            
-            if 0 <= u < w and 0 <= v < h:
-                z = float(depth_img[v, u]) * self.depth_scale
-                if z > 0:
-                    x_3d = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
-                    y_3d = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
-                    return np.array([x_3d, y_3d, z]), (u, v)
-            
-            return None, None
-            
-        except Exception as e:
-            self.get_logger().error(f"교점 계산 실패: {e}")
-            import traceback
-            self.get_logger().error(traceback.format_exc())
-            return None, None
-    
-    def _process_hold_point(self, color_img, depth_img):
-        # ✅ 객체 검출 제거 - 손만 검출
+    def _process_finger_pointing(self, color_img, depth_img):
+        """
+        'track_hand' 모드: 검지 끝 추적
+        검지 끝이 안정적으로 3번 연속 같은 위치에 있을 때만 좌표 발행
+        """
+        # 손 검출
         hand_landmarks = self.hand_detector.detect(color_img)
-        
-        # 손 깊이 정보 로그
-        if hand_landmarks is not None and hand_landmarks.hand_depth != 0.0:
-            self.get_logger().info(f"[HOLD] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
-        
         self._draw_hand(hand_landmarks)
         
         if hand_landmarks is None:
             self.hit_buffer.clear()
             return
         
-        # ✅ 손끝 2D 좌표
+        # 검지 끝 2D 좌표
+        if not hasattr(hand_landmarks, 'fingertip_2d'):
+            self.get_logger().warn("[FINGER] fingertip_2d 없음")
+            self.hit_buffer.clear()
+            return
+        
         fingertip_2d = hand_landmarks.fingertip_2d
         if not isinstance(fingertip_2d, (tuple, list)) or len(fingertip_2d) < 2:
-            self.get_logger().warn("[HOLD] 손끝 좌표 형식 오류")
+            self.get_logger().warn("[FINGER] 손끝 좌표 형식 오류")
             self.hit_buffer.clear()
             return
         
@@ -548,52 +461,69 @@ class CommandVisionNode(Node):
         
         # 범위 체크
         if not (0 <= u < w and 0 <= v < h):
-            self.get_logger().warn(f"[HOLD] 손끝 좌표 범위 초과: ({u}, {v})")
+            self.get_logger().warn(f"[FINGER] 손끝 좌표 범위 초과: ({u}, {v})")
             self.hit_buffer.clear()
             return
         
-        # ✅ 개선: 5×5 윈도우 평균 (손끝은 작은 영역)
+        # Depth → 3D 좌표 계산
         z = self._get_depth_robust(depth_img, (u, v), window_size=5) * self.depth_scale
         
         if z <= 0:
-            self.get_logger().warn(f"[HOLD] 유효하지 않은 Depth: z={z}")
+            self.get_logger().warn(f"[FINGER] 유효하지 않은 Depth: z={z}")
             self.hit_buffer.clear()
             return
         
-        # 3D 좌표 계산
         x_3d = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
         y_3d = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
         fingertip_3d = np.array([x_3d, y_3d, z])
         
-        self.get_logger().info(f"[HOLD] 손끝 위치: pixel=({u}, {v}), 3D={fingertip_3d.round(3)}")
+        self.get_logger().info(f"[FINGER] 검지 끝: pixel=({u}, {v}), 3D={fingertip_3d.round(3)}")
         
-        # ✅ 시각화: 손끝에 타겟 마커 표시
+        # 시각화: 검지 끝에 타겟 마커
         self._draw_intersection((u, v))
         
-        # 버퍼에 추가 (위치 기반)
-        position_key = f"pos_{u}_{v}"
-        self.hit_buffer.append(position_key)
+        # ✅ 버퍼에 3D 좌표 추가
+        self.hit_buffer.append(fingertip_3d.copy())
         
-        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/3")
+        self.get_logger().info(f"[FINGER] 버퍼: {len(self.hit_buffer)}/3")
         
-        # ✅ 3회 연속으로 안정적이면 발행
+        # ✅ 3회 이상이면 안정성 체크
         if len(self.hit_buffer) >= 3:
-            # 최근 3개 위치의 평균으로 안정성 체크
+            # 최근 3개 위치
             recent_positions = list(self.hit_buffer)[-3:]
+            recent_array = np.array(recent_positions)  # shape: (3, 3)
             
-            # 위치가 너무 많이 변하지 않았는지 체크 (간단하게 처리)
-            self.get_logger().info(f"[HOLD] ✅ 3회 연속 안정")
+            # 표준편차 계산
+            std_dev = np.std(recent_array, axis=0)  # [x_std, y_std, z_std]
+            max_std = np.max(std_dev)
             
-            # Base 좌표로 변환
-            base_coords = self._camera_to_base(fingertip_3d)
+            # 안정성 기준: 최대 표준편차가 10mm 이하
+            stability_threshold = 10.0  # mm
             
-            # 좌표 발행
-            self._publish_pose(base_coords, "fingertip_position")
-            
-            self.current_mode = "IDLE"
-            self._publish_status("손끝 위치로 이동")
-            self.hit_buffer.clear()
-            self.last_published = position_key
+            if max_std < stability_threshold:
+                # ✅ 안정: 평균 위치로 발행
+                avg_position = np.mean(recent_array, axis=0)
+                
+                self.get_logger().info(
+                    f"[FINGER] ✅ 안정 (std: {max_std:.2f}mm < {stability_threshold}mm)"
+                )
+                self.get_logger().info(f"[FINGER] 평균 3D: {avg_position.round(3)}")
+                
+                # Base 좌표로 변환
+                base_coords = self._camera_to_base(avg_position)
+                
+                # 좌표 발행
+                self._publish_pose(base_coords, "fingertip_tracking")
+                
+                self.current_mode = "IDLE"
+                self._publish_status("검지 끝 추적 완료")
+                self.hit_buffer.clear()
+                self.last_published = f"finger_{u}_{v}"
+            else:
+                # ⏳ 불안정: 계속 대기
+                self.get_logger().info(
+                    f"[FINGER] ⏳ 불안정 (std: {max_std:.2f}mm > {stability_threshold}mm)"
+                )
     
     def _process_object_detection(self, color_img, depth_img):
         detections = self.object_detector.detect(color_img)
@@ -638,85 +568,6 @@ class CommandVisionNode(Node):
                 self.get_logger().warn(f"유효하지 않은 Depth: z={z}")
         else:
             self.get_logger().warn(f"좌표 범위 초과: u={u}, v={v}")
-    
-    def _process_pointing_detection(self, color_img, depth_img):
-        detections = self.object_detector.detect(color_img)
-        self._draw_detections(detections)
-        
-        if len(detections) == 0:
-            self.hit_buffer.clear()
-            return
-        
-        hand_landmarks = self.hand_detector.detect(color_img)
-        
-        # ✅ 손 깊이 정보 로그
-        if hand_landmarks is not None and hand_landmarks.hand_depth != 0.0:
-            self.get_logger().info(f"[POINT] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
-        
-        self._draw_hand(hand_landmarks)
-        
-        if hand_landmarks is None:
-            self.hit_buffer.clear()
-            return
-        
-        try:
-            self.pointing_analyzer.update_3d_info(
-                hand_landmarks, detections, depth_img,
-                self.intrinsics, self.depth_scale
-            )
-        except Exception as e:
-            self.get_logger().error(f"[POINT] 3D 업데이트 실패: {e}")
-            return
-        
-        pointed_object = self.pointing_analyzer.find_pointed_object(
-            hand_landmarks, detections
-        )
-        
-        if pointed_object:
-            self.get_logger().info(f"[POINT] 👉 {pointed_object.class_name}")
-            
-            # ✅ Offset 적용
-            center_2d_adjusted = self._apply_offset(
-                pointed_object.center_2d, 
-                pointed_object.class_name
-            )
-            
-            # 조정된 2D 좌표로 3D 재계산
-            u, v = center_2d_adjusted
-            if 0 <= u < depth_img.shape[1] and 0 <= v < depth_img.shape[0]:
-                # ✅ 개선: 7×7 윈도우 평균 (객체 표면)
-                z = self._get_depth_robust(depth_img, (u, v), window_size=7) * self.depth_scale
-                if z > 0:
-                    x = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
-                    y = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
-                    camera_coords_adjusted = np.array([x, y, z])
-                    
-                    self.get_logger().info(f"[POINT] 3D 좌표: {camera_coords_adjusted.round(3)}")
-                    
-                    self.hit_buffer.append(pointed_object.class_name)
-                    
-                    self.get_logger().info(f"[POINT] 버퍼: {len(self.hit_buffer)}/5")
-                    
-                    if (len(self.hit_buffer) >= 3 and
-                        len(set(self.hit_buffer)) == 1):
-                        
-                        obj_name = pointed_object.class_name
-                        
-                        if self.last_published == obj_name:
-                            self.get_logger().info(f"[POINT] 이미 발행: {obj_name}")
-                            return
-                        
-                        self.get_logger().info(f"[POINT] ✅ 3회 연속: {obj_name}")
-                        
-                        base_coords = self._camera_to_base(camera_coords_adjusted)
-                        self._publish_pose(base_coords, obj_name)
-                        
-                        self.last_published = obj_name
-                        self.current_mode = "IDLE"
-                        self._publish_status("대기 중")
-                        self.hit_buffer.clear()
-        else:
-            self.hit_buffer.clear()
     
     def _camera_to_base(self, cam_coords):
         from DSR_ROBOT2 import get_current_posx
