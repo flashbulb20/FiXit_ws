@@ -86,10 +86,10 @@ class CommandVisionNode(Node):
         # ✅ 프레임 스킵 설정 (FINGER_POINTING용)
         self.frame_counter = 0
         self.frame_skip = 5  # 5프레임마다 1번 체크 (15fps → 3fps 체크)
-
+        
         # ✅ 디버그 이미지 발행 프레임 스킵
         self.debug_image_counter = 0
-        self.debug_image_skip = 5  # 5프레임마다 1번 발행 (15fps → 3fps)
+        self.debug_image_skip = 2  # 2프레임마다 1번 발행 (15fps → 7.5fps)
         
         # 7. 시각화 설정
         self.enable_visualization = True
@@ -146,7 +146,7 @@ class CommandVisionNode(Node):
         
         return within_bounds
     
-    def _get_depth_robust(self, depth_img, center_2d, window_size=7):
+    def _get_depth_robust(self, depth_img, center_2d, window_size=7, use_median=False):
         u, v = int(center_2d[0]), int(center_2d[1])
         h, w = depth_img.shape
         
@@ -185,20 +185,25 @@ class CommandVisionNode(Node):
             if len(filtered_depths) > 0:
                 valid_depths = filtered_depths
         
-        # 평균 계산
-        mean_depth = float(np.mean(valid_depths))
+        # ✅ median 또는 mean 계산
+        if use_median:
+            result_depth = float(np.median(valid_depths))
+            method = "median"
+        else:
+            result_depth = float(np.mean(valid_depths))
+            method = "mean"
         
         # 디버그 정보
         single_pixel_depth = float(depth_img[v, u]) if depth_img[v, u] > 0 else 0.0
-        diff = abs(mean_depth - single_pixel_depth) if single_pixel_depth > 0 else 0.0
+        diff = abs(result_depth - single_pixel_depth) if single_pixel_depth > 0 else 0.0
         
         self.get_logger().debug(
             f"[DEPTH] 단일: {single_pixel_depth:.1f}mm, "
-            f"평균({window_size}×{window_size}): {mean_depth:.1f}mm, "
+            f"{method}({window_size}×{window_size}): {result_depth:.1f}mm, "
             f"차이: {diff:.1f}mm"
         )
         
-        return mean_depth
+        return result_depth
     
     def command_callback(self, msg: String):
         command = msg.data.strip().lower()
@@ -234,7 +239,7 @@ class CommandVisionNode(Node):
                 self.get_logger().info(f"[MODE] OBJECT_DETECT - '{self.target_object}' 찾기")
                 self._publish_status(f"'{self.target_object}' 검색 중...")
                 return
-
+ 
         # 3. 중지
         if any(word in command for word in ['중지', '취소', '멈춰', 'stop', 'cancel']):
             self.current_mode = "IDLE"
@@ -480,6 +485,79 @@ class CommandVisionNode(Node):
         except Exception as e:
             self.get_logger().error(f"이미지 발행 실패: {e}")
     
+    def _process_hold_point(self, color_img, depth_img):
+        # ✅ 객체 검출 제거 - 손만 검출
+        hand_landmarks = self.hand_detector.detect(color_img)
+        
+        # 손 깊이 정보 로그
+        if hand_landmarks is not None and hand_landmarks.hand_depth != 0.0:
+            self.get_logger().info(f"[HOLD] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
+        
+        self._draw_hand(hand_landmarks)
+        
+        if hand_landmarks is None:
+            self.hit_buffer.clear()
+            return
+        
+        # ✅ 손끝 2D 좌표
+        fingertip_2d = hand_landmarks.fingertip_2d
+        if not isinstance(fingertip_2d, (tuple, list)) or len(fingertip_2d) < 2:
+            self.get_logger().warn("[HOLD] 손끝 좌표 형식 오류")
+            self.hit_buffer.clear()
+            return
+        
+        u, v = int(fingertip_2d[0]), int(fingertip_2d[1])
+        h, w = depth_img.shape
+        
+        # 범위 체크
+        if not (0 <= u < w and 0 <= v < h):
+            self.get_logger().warn(f"[HOLD] 손끝 좌표 범위 초과: ({u}, {v})")
+            self.hit_buffer.clear()
+            return
+        
+        # ✅ 개선: 5×5 윈도우 평균 (손끝은 작은 영역)
+        z = self._get_depth_robust(depth_img, (u, v), window_size=5) * self.depth_scale
+        
+        if z <= 0:
+            self.get_logger().warn(f"[HOLD] 유효하지 않은 Depth: z={z}")
+            self.hit_buffer.clear()
+            return
+        
+        # 3D 좌표 계산
+        x_3d = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
+        y_3d = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
+        fingertip_3d = np.array([x_3d, y_3d, z])
+        
+        self.get_logger().info(f"[HOLD] 손끝 위치: pixel=({u}, {v}), 3D={fingertip_3d.round(3)}")
+        
+        # ✅ 시각화: 손끝에 타겟 마커 표시
+        self._draw_intersection((u, v))
+        
+        # 버퍼에 추가 (위치 기반)
+        position_key = f"pos_{u}_{v}"
+        self.hit_buffer.append(position_key)
+        
+        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/3")
+        
+        # ✅ 3회 연속으로 안정적이면 발행
+        if len(self.hit_buffer) >= 3:
+            # 최근 3개 위치의 평균으로 안정성 체크
+            recent_positions = list(self.hit_buffer)[-3:]
+            
+            # 위치가 너무 많이 변하지 않았는지 체크 (간단하게 처리)
+            self.get_logger().info(f"[HOLD] ✅ 3회 연속 안정")
+            
+            # Base 좌표로 변환
+            base_coords = self._camera_to_base(fingertip_3d)
+            
+            # 좌표 발행
+            self._publish_pose(base_coords, "fingertip_position")
+            
+            self.current_mode = "IDLE"
+            self._publish_status("손끝 위치로 이동")
+            self.hit_buffer.clear()
+            self.last_published = position_key
+    
     def _process_finger_pointing(self, color_img, depth_img):
         """
         'track_hand' 모드: 검지 끝 추적
@@ -522,8 +600,9 @@ class CommandVisionNode(Node):
             self.hit_buffer.clear()
             return
         
-        # Depth → 3D 좌표 계산
-        z = self._get_depth_robust(depth_img, (u, v), window_size=5) * self.depth_scale
+        # ✅ Depth → 3D 좌표 계산 (3×3 윈도우, median 사용)
+        # 검지 끝은 작은 영역이라 배경 개입이 쉬우므로 median이 더 강건함
+        z = self._get_depth_robust(depth_img, (u, v), window_size=3, use_median=True) * self.depth_scale
         
         if z <= 0:
             self.get_logger().warn(f"[FINGER] 유효하지 않은 Depth: z={z}")
