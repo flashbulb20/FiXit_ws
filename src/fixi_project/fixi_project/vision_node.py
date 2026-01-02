@@ -86,6 +86,10 @@ class CommandVisionNode(Node):
         # ✅ 프레임 스킵 설정 (FINGER_POINTING용)
         self.frame_counter = 0
         self.frame_skip = 5  # 5프레임마다 1번 체크 (15fps → 3fps 체크)
+
+        # ✅ 디버그 이미지 발행 프레임 스킵
+        self.debug_image_counter = 0
+        self.debug_image_skip = 5  # 5프레임마다 1번 발행 (15fps → 3fps)
         
         # 7. 시각화 설정
         self.enable_visualization = True
@@ -93,6 +97,15 @@ class CommandVisionNode(Node):
         
         # 8. 메인 루프
         self.create_timer(1/15.0, self.main_loop)
+        
+        # ✅ 9. 작업 공간 범위 설정 (로봇 베이스 좌표계 기준, mm 단위)
+        self.workspace_bounds = {
+            'min': np.array([-221.780, -300.100, 217.520]),  # [x_min, y_min, z_min]
+            'max': np.array([708.300, 194.300, 651.060])      # [x_max, y_max, z_max]
+        }
+        self.get_logger().info("✓ 작업 공간 범위 설정:")
+        self.get_logger().info(f"  Min: {self.workspace_bounds['min']}")
+        self.get_logger().info(f"  Max: {self.workspace_bounds['max']}")
         
         self.get_logger().info("✓ Command Vision Node 준비 완료")
         self.get_logger().info("  시각화: /vision/debug_image 토픽")
@@ -104,6 +117,34 @@ class CommandVisionNode(Node):
             for obj in enabled_offsets:
                 cfg = self.object_offsets[obj]
                 self.get_logger().info(f"    - {obj}: {cfg['description']} {cfg['pixel']}")
+    
+    def _is_within_workspace(self, base_coords):
+        if base_coords is None or len(base_coords) < 3:
+            return False
+        
+        coords = np.array(base_coords[:3])  # [x, y, z]만 사용
+        
+        # 각 축별로 범위 체크
+        within_bounds = np.all(
+            (coords >= self.workspace_bounds['min']) & 
+            (coords <= self.workspace_bounds['max'])
+        )
+        
+        if not within_bounds:
+            # 어느 축이 벗어났는지 로그
+            out_of_bounds = []
+            axes = ['X', 'Y', 'Z']
+            for i, axis in enumerate(axes):
+                if coords[i] < self.workspace_bounds['min'][i]:
+                    out_of_bounds.append(f"{axis}={coords[i]:.1f} < {self.workspace_bounds['min'][i]:.1f}")
+                elif coords[i] > self.workspace_bounds['max'][i]:
+                    out_of_bounds.append(f"{axis}={coords[i]:.1f} > {self.workspace_bounds['max'][i]:.1f}")
+            
+            self.get_logger().warn(
+                f"[WORKSPACE] 범위 초과: {', '.join(out_of_bounds)}"
+            )
+        
+        return within_bounds
     
     def _get_depth_robust(self, depth_img, center_2d, window_size=7):
         u, v = int(center_2d[0]), int(center_2d[1])
@@ -194,6 +235,7 @@ class CommandVisionNode(Node):
                 self._publish_status(f"'{self.target_object}' 검색 중...")
                 return
 
+        # 3. 중지
         if any(word in command for word in ['중지', '취소', '멈춰', 'stop', 'cancel']):
             self.current_mode = "IDLE"
             self.target_object = None
@@ -228,9 +270,11 @@ class CommandVisionNode(Node):
         elif self.current_mode == "FINGER_POINTING":
             self._process_finger_pointing(color_img, depth_img)
         
-        # ROS2 이미지 발행
+        # ROS2 이미지 발행 (프레임 스킵 적용)
         if self.enable_visualization and self.debug_frame is not None:
-            self._publish_debug_image()
+            self.debug_image_counter += 1
+            if self.debug_image_counter % self.debug_image_skip == 0:
+                self._publish_debug_image()
     
     def _apply_offset(self, center_2d, obj_class_name):
         offset_config = self.object_offsets.get(obj_class_name.lower(), None)
@@ -603,6 +647,18 @@ class CommandVisionNode(Node):
         return base_coord
     
     def _publish_pose(self, position, object_name):
+        # ✅ 작업 공간 범위 체크
+        if not self._is_within_workspace(position):
+            self.get_logger().error("=" * 60)
+            self.get_logger().error(f"[PUBLISH] ✗ 좌표 발행 거부!")
+            self.get_logger().error(f"[PUBLISH]   Object: {object_name}")
+            self.get_logger().error(f"[PUBLISH]   Position: {position.round(3)}")
+            self.get_logger().error(f"[PUBLISH]   이유: 작업 공간 범위 초과")
+            self.get_logger().error("=" * 60)
+            self._publish_status(f"{object_name} - 범위 초과로 발행 거부")
+            return  # ✅ 토픽 발행하지 않음!
+        
+        # ✅ 범위 내: 정상 발행
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "base"
