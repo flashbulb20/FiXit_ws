@@ -83,6 +83,10 @@ class CommandVisionNode(Node):
         self.hit_buffer = deque(maxlen=3)
         self.last_published = None
         
+        # ✅ 프레임 스킵 설정 (FINGER_POINTING용)
+        self.frame_counter = 0
+        self.frame_skip = 5  # 5프레임마다 1번 체크 (15fps → 3fps 체크)
+        
         # 7. 시각화 설정
         self.enable_visualization = True
         self.debug_frame = None
@@ -167,7 +171,9 @@ class CommandVisionNode(Node):
             self.target_object = None
             self.hit_buffer.clear()
             self.last_published = None
+            self.frame_counter = 0  # ✅ 프레임 카운터 리셋
             self.get_logger().info("[MODE] FINGER_POINTING - 손가락 가리킴")
+            self.get_logger().info(f"  프레임 스킵: {self.frame_skip} (체크 주기: {self.frame_skip/15.0:.2f}초)")
             self._publish_status("손가락으로 가리켜주세요")
             return
         
@@ -187,8 +193,7 @@ class CommandVisionNode(Node):
                 self.get_logger().info(f"[MODE] OBJECT_DETECT - '{self.target_object}' 찾기")
                 self._publish_status(f"'{self.target_object}' 검색 중...")
                 return
-             
-        # 3. 중지
+
         if any(word in command for word in ['중지', '취소', '멈춰', 'stop', 'cancel']):
             self.current_mode = "IDLE"
             self.target_object = None
@@ -431,11 +436,93 @@ class CommandVisionNode(Node):
         except Exception as e:
             self.get_logger().error(f"이미지 발행 실패: {e}")
     
+    
+    def _process_hold_point(self, color_img, depth_img):
+        # ✅ 객체 검출 제거 - 손만 검출
+        hand_landmarks = self.hand_detector.detect(color_img)
+        
+        # 손 깊이 정보 로그
+        if hand_landmarks is not None and hand_landmarks.hand_depth != 0.0:
+            self.get_logger().info(f"[HOLD] 손 선택: depth={hand_landmarks.hand_depth:.3f} (작을수록 앞)")
+        
+        self._draw_hand(hand_landmarks)
+        
+        if hand_landmarks is None:
+            self.hit_buffer.clear()
+            return
+        
+        # ✅ 손끝 2D 좌표
+        fingertip_2d = hand_landmarks.fingertip_2d
+        if not isinstance(fingertip_2d, (tuple, list)) or len(fingertip_2d) < 2:
+            self.get_logger().warn("[HOLD] 손끝 좌표 형식 오류")
+            self.hit_buffer.clear()
+            return
+        
+        u, v = int(fingertip_2d[0]), int(fingertip_2d[1])
+        h, w = depth_img.shape
+        
+        # 범위 체크
+        if not (0 <= u < w and 0 <= v < h):
+            self.get_logger().warn(f"[HOLD] 손끝 좌표 범위 초과: ({u}, {v})")
+            self.hit_buffer.clear()
+            return
+        
+        # ✅ 개선: 5×5 윈도우 평균 (손끝은 작은 영역)
+        z = self._get_depth_robust(depth_img, (u, v), window_size=5) * self.depth_scale
+        
+        if z <= 0:
+            self.get_logger().warn(f"[HOLD] 유효하지 않은 Depth: z={z}")
+            self.hit_buffer.clear()
+            return
+        
+        # 3D 좌표 계산
+        x_3d = (u - self.intrinsics['ppx']) * z / self.intrinsics['fx']
+        y_3d = (v - self.intrinsics['ppy']) * z / self.intrinsics['fy']
+        fingertip_3d = np.array([x_3d, y_3d, z])
+        
+        self.get_logger().info(f"[HOLD] 손끝 위치: pixel=({u}, {v}), 3D={fingertip_3d.round(3)}")
+        
+        # ✅ 시각화: 손끝에 타겟 마커 표시
+        self._draw_intersection((u, v))
+        
+        # 버퍼에 추가 (위치 기반)
+        position_key = f"pos_{u}_{v}"
+        self.hit_buffer.append(position_key)
+        
+        self.get_logger().info(f"[HOLD] 버퍼: {len(self.hit_buffer)}/3")
+        
+        # ✅ 3회 연속으로 안정적이면 발행
+        if len(self.hit_buffer) >= 3:
+            # 최근 3개 위치의 평균으로 안정성 체크
+            recent_positions = list(self.hit_buffer)[-3:]
+            
+            # 위치가 너무 많이 변하지 않았는지 체크 (간단하게 처리)
+            self.get_logger().info(f"[HOLD] ✅ 3회 연속 안정")
+            
+            # Base 좌표로 변환
+            base_coords = self._camera_to_base(fingertip_3d)
+            
+            # 좌표 발행
+            self._publish_pose(base_coords, "fingertip_position")
+            
+            self.current_mode = "IDLE"
+            self._publish_status("손끝 위치로 이동")
+            self.hit_buffer.clear()
+            self.last_published = position_key
+    
     def _process_finger_pointing(self, color_img, depth_img):
         """
         'track_hand' 모드: 검지 끝 추적
         검지 끝이 안정적으로 3번 연속 같은 위치에 있을 때만 좌표 발행
         """
+        # ✅ 프레임 스킵: N프레임마다 한 번씩만 체크
+        self.frame_counter += 1
+        if self.frame_counter % self.frame_skip != 0:
+            # 시각화만 하고 리턴
+            hand_landmarks = self.hand_detector.detect(color_img)
+            self._draw_hand(hand_landmarks)
+            return
+        
         # 손 검출
         hand_landmarks = self.hand_detector.detect(color_img)
         self._draw_hand(hand_landmarks)
@@ -485,7 +572,11 @@ class CommandVisionNode(Node):
         # ✅ 버퍼에 3D 좌표 추가
         self.hit_buffer.append(fingertip_3d.copy())
         
-        self.get_logger().info(f"[FINGER] 버퍼: {len(self.hit_buffer)}/3")
+        elapsed_time = len(self.hit_buffer) * self.frame_skip / 15.0  # 초 단위
+        self.get_logger().info(
+            f"[FINGER] 버퍼: {len(self.hit_buffer)}/3 "
+            f"(프레임 스킵: {self.frame_skip}, 경과: {elapsed_time:.1f}초)"
+        )
         
         # ✅ 3회 이상이면 안정성 체크
         if len(self.hit_buffer) >= 3:
