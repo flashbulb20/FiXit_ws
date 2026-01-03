@@ -30,6 +30,7 @@ class HandLandmarks:
     fingertip_3d: Optional[np.ndarray] = None  # 3D 좌표
     wrist_3d: Optional[np.ndarray] = None
     pointing_ray: Optional[np.ndarray] = None  # 가리키는 방향 벡터
+    hand_depth: float = 0.0  # ✅ 손의 깊이 (Z 값, 작을수록 앞)
 
 
 class ObjectDetector:
@@ -75,7 +76,7 @@ class ObjectDetector:
 
 class HandDetector:
     def __init__(self, 
-                 max_num_hands: int = 1,
+                 max_num_hands: int = 2,  # ✅ 2개로 증가
                  min_detection_confidence: float = 0.7,
                  min_tracking_confidence: float = 0.5):
 
@@ -87,7 +88,17 @@ class HandDetector:
         )
         self.mp_drawing = mp.solutions.drawing_utils
     
-    def detect(self, image: np.ndarray) -> Optional[HandLandmarks]:
+    def detect(self, image: np.ndarray, debug: bool = False) -> Optional[HandLandmarks]:
+        """
+        손을 검출하고, 여러 손이 있으면 가장 앞(카메라에 가까운) 손 반환
+        
+        Args:
+            image: 입력 이미지
+            debug: True이면 디버그 정보 출력
+        
+        Returns:
+            HandLandmarks 또는 None
+        """
         # MediaPipe는 RGB 이미지 필요
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_image)
@@ -95,17 +106,43 @@ class HandDetector:
         if not results.multi_hand_landmarks:
             return None
         
-        # 첫 번째 손만 사용
-        landmarks = results.multi_hand_landmarks[0]
         h, w = image.shape[:2]
+        num_hands = len(results.multi_hand_landmarks)
+        
+        # ✅ 여러 손 중에서 가장 앞에 있는 손 선택
+        # Z 값이 작을수록 카메라에 가까움 (손목의 Z 값으로 비교)
+        best_hand = None
+        min_z = float('inf')
+        hand_info = []  # 디버깅용
+        
+        for idx, landmarks in enumerate(results.multi_hand_landmarks):
+            # 손목의 Z 좌표 (landmark[0].z)
+            # MediaPipe의 Z는 정규화된 값 (손목 기준 상대 거리)
+            wrist_z = landmarks.landmark[0].z
+            
+            hand_info.append((idx, wrist_z))
+            
+            # 가장 작은 Z 값을 가진 손 선택
+            if wrist_z < min_z:
+                min_z = wrist_z
+                best_hand = landmarks
+        
+        if best_hand is None:
+            return None
+        
+        # 디버그 정보 출력
+        if debug and num_hands > 1:
+            hand_info_str = ", ".join([f"Hand{i}: z={z:.3f}" for i, z in hand_info])
+            print(f"[HandDetector] {num_hands}개 손 감지 → 가장 앞: z={min_z:.3f} | {hand_info_str}")
         
         # 검지 끝 (index 8)과 손목 (index 0)
-        fingertip = landmarks.landmark[8]
-        wrist = landmarks.landmark[0]
+        fingertip = best_hand.landmark[8]
+        wrist = best_hand.landmark[0]
         
         return HandLandmarks(
             fingertip_2d=(int(fingertip.x * w), int(fingertip.y * h)),
-            wrist_2d=(int(wrist.x * w), int(wrist.y * h))
+            wrist_2d=(int(wrist.x * w), int(wrist.y * h)),
+            hand_depth=min_z  # ✅ 손의 깊이 저장
         )
     
     def visualize(self, image: np.ndarray, hand_landmarks) -> np.ndarray:
@@ -119,7 +156,7 @@ class HandDetector:
 
 
 class PointingAnalyzer:
-    def __init__(self, distance_threshold: float = 30.0):
+    def __init__(self, distance_threshold: float = 50.0):
         self.distance_threshold = distance_threshold
     
     def compute_3d_coords(self, 
