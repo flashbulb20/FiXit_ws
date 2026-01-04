@@ -33,7 +33,7 @@ class VisionPointingVoiceNode(Node):
         
         pygame.mixer.init()
         self.system_prompt = """
-        당신은 Doosan M0609 로봇 팔과 TurtleBot4의 지능형 통역사입니다. 
+        당신은 Doosan M0609 로봇 팔의 지능형 통역사입니다. 
         사용자의 한국어 요청을 로봇이 이해할 수 있는 '영어 토픽 명칭'으로 변환하세요.
 
         [연속 대화 규칙]
@@ -50,7 +50,7 @@ class VisionPointingVoiceNode(Node):
         6. 작업 보조:
             - "pcb 잡아줘", "기판 잡아줘" -> hold_pcb
             - "여기 잡아줘" -> hold_here 
-            - "잡아", "고정해" -> grab
+            - "자바", "잡아", "고정해" -> grab
             - "놔", "놔 줘" -> open
             - "위로/아래로/왼쪽/오른쪽/앞으로/뒤로" -> nudge_up, nudge_down, nudge_left, nudge_right, nudge_forward, nudge_backward
             - "돌아가", "집으로" -> go_home 
