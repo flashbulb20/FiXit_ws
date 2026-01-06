@@ -186,6 +186,8 @@ Voice AI & LLM: [Team Member Name]
 
 Robot Control: [Team Member Name]
 
+Main Control: namgoo1018
+
 ---
 
 ## 📄 License
