@@ -1,5 +1,5 @@
 # 🤖 FiXit: AI-Powered PCB Repair Assistant Robot
-"The Smart Third Hand for Engineers" > LLM(GPT-4o) 기반의 음성 인식과 **Vision AI(YOLO+MediaPipe)**를 결합한 지능형 PCB 수리 보조 로봇 프로젝트입니다.
+"The Smart Third Hand for Engineers" > LLM(GPT-4o) 기반의 음성 인식과 Vision AI(YOLO+MediaPipe)를 결합한 지능형 PCB 수리 보조 로봇 프로젝트입니다.
 
 [![ROS2](https://img.shields.io/badge/ROS2-Humble-22314E?style=for-the-badge&logo=ros)](https://docs.ros.org/en/humble/)
 [![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=for-the-badge&logo=python)](https://www.python.org/)
@@ -15,7 +15,7 @@
 
 단순 키워드가 아닌 자연어 맥락을 이해합니다.
 
-"납이 잘 안 녹네" → **Flux(플럭스)**를 가져다줌.
+"납이 잘 안 녹네" → Flux(플럭스)를 가져다줌.
 
 "여기 좀 잡아줘" → 손짓을 인식하여 해당 위치 파지.
 
@@ -27,7 +27,7 @@ Robust Depth Filtering을 적용하여 손떨림이나 노이즈에 강인합니
 
 🛡️ Human-in-the-Loop Safety
 
-물체를 잡기 전 **"잡아(Catch)"**라는 음성 트리거가 있어야만 그리퍼가 닫힙니다.
+물체를 잡기 전 "잡아"라는 음성 트리거가 있어야만 그리퍼가 닫힙니다.
 
 작업자의 손 끼임 사고를 원천 차단합니다.
 
@@ -73,8 +73,8 @@ flowchart LR
 | Robot Arm | Doosan M0609        | 6축 협동 로봇 (Payload 6kg)             |
 | Gripper   | OnRobot RG2         | 2-Finger 그리퍼 (Modbus TCP 제어)      |
 | Camera    | Intel RealSense D435| Depth & RGB Vision                      |
-| Microphone| USB Condenser Mic   | 음성 수음                               |
-| Speaker   | USB Speaker         | TTS 음성 출력                           |
+| Microphone| USB Mic             | 음성 수음                               |
+| Speaker   | Builtin Speaker     | TTS 음성 출력                           |
 
 ---
 
