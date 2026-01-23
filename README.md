@@ -67,21 +67,21 @@ flowchart LR
     style ROBOT fill:#28A745,stroke:#333,stroke-width:2px,color:#fff
 
     %% ===== [TOPIC] Voice <-> Main =====
-    VOICE -->|/voice/cmd<br/>String: fetch_flux, stop...| MAIN
-    MAIN -->|/voice/tts<br/>String: feedback msg| VOICE
+    VOICE -->|/voice/cmd| MAIN
+    MAIN -->|/voice/tts| VOICE
 
     %% ===== [TOPIC] Vision <-> Main =====
-    MAIN -->|/vision/cmd<br/>String: find_tool, track_hand| VISION
-    VISION -->|/vision/target_pose<br/>PoseStamped: Detected XYZ| MAIN
-    VISION -->|/vision/status<br/>String: Ready / Searching| MAIN
+    MAIN -->|/vision/cmd| VISION
+    VISION -->|/vision/target_pose| MAIN
+    VISION -->|/vision/status| MAIN
 
     %% ===== [TOPIC] Robot <-> Main =====
-    MAIN -->|/robot/target_pose<br/>PoseStamped: MoveIt Path| ROBOT
-    MAIN -->|/robot/nudge_cmd<br/>String: HOME, SCAN, RECOVERY| ROBOT
-    MAIN -->|/robot/jog<br/>String: TURN_LEFT, STOP| ROBOT
-    MAIN -->|/robot/gripper<br/>String: close_tool, open| ROBOT
+    MAIN -->|/robot/target_pose| ROBOT
+    MAIN -->|/robot/nudge_cmd| ROBOT
+    MAIN -->|/robot/jog| ROBOT
+    MAIN -->|/robot/gripper| ROBOT
 
-    ROBOT -->|/robot/status<br/>String: arrived, fail: collision| MAIN
+    ROBOT -->|/robot/status| MAIN
 
 ```
 ### Hardware Setup
