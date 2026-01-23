@@ -43,27 +43,45 @@ Robust Depth Filtering을 적용하여 손떨림이나 노이즈에 강인합니
 
 ```mermaid
 flowchart LR
-    %% 노드 정의 %%
-    MAIN("🟦 Main Controller<br>(logic_node)")
-    VOICE("🟨 Voice Node<br>(voice_node)")
-    VISION("🟩 Vision Node<br>(vision_node)")
-    ROBOT("🟥 Robot Node<br>(robot_control_node)")
+    %% ===== 영역 구분 =====
+    subgraph LEFT["🎤 Voice"]
+        direction TB
+        VOICE("🟦 Voice Node<br/>(Mic Controller + STT/TTS)")
+    end
 
-    %% 스타일 %%
-    style MAIN fill:#4A90E2,stroke:#000,stroke-width:2px,opacity:0.9
-    style VOICE fill:#F5A623,stroke:#000,stroke-width:2px,opacity:0.9
-    style VISION fill:#7ED321,stroke:#000,stroke-width:2px,opacity:0.9
-    style ROBOT fill:#D0021B,stroke:#000,stroke-width:2px,opacity:0.9
+    subgraph CENTER["🧠 Main"]
+        direction TB
+        MAIN("🟧 Main Controller<br/>(State Machine & Orchestrator)")
+    end
 
-    %% 통신 관계 %%
-    MAIN -->|"/voice/cmd (std_msgs/String), /vision/cmd (std_msgs/String), /robot/target_pose (geometry_msgs/PoseStamped), /robot/gripper (std_msgs/String)"| VOICE
-    MAIN -->|"/vision/target_pose<br>(geometry_msgs/PoseStamped), /vision/status (std_msgs/String)"| VISION
-    MAIN -->|"/robot/status (std_msgs/String)"| ROBOT
+    subgraph RIGHT["🤖 Vision & Robot"]
+        direction TB
+        VISION("🟪 Vision Node<br/>(YOLOv8 + MediaPipe)")
+        ROBOT("🟩 Robot Controller<br/>(Motion Planning & Recovery)")
+    end
 
-    %% 상태 업데이트 %%
-    VOICE -->|"/voice/tts(std_msgs/String)"| MAIN
-    VISION -->|"/vision/status<br>(std_msgs/String)"| MAIN
-    ROBOT -->|"/robot/status<br>(std_msgs/String)"| MAIN
+    %% ===== 스타일 =====
+    style MAIN fill:#FF9900,stroke:#333,stroke-width:3px,color:#fff
+    style VOICE fill:#007BFF,stroke:#333,stroke-width:2px,color:#fff
+    style VISION fill:#9C27B0,stroke:#333,stroke-width:2px,color:#fff
+    style ROBOT fill:#28A745,stroke:#333,stroke-width:2px,color:#fff
+
+    %% ===== [TOPIC] Voice <-> Main =====
+    VOICE -->|/voice/cmd<br/>String: fetch_flux, stop...| MAIN
+    MAIN -->|/voice/tts<br/>String: feedback msg| VOICE
+
+    %% ===== [TOPIC] Vision <-> Main =====
+    MAIN -->|/vision/cmd<br/>String: find_tool, track_hand| VISION
+    VISION -->|/vision/target_pose<br/>PoseStamped: Detected XYZ| MAIN
+    VISION -->|/vision/status<br/>String: Ready / Searching| MAIN
+
+    %% ===== [TOPIC] Robot <-> Main =====
+    MAIN -->|/robot/target_pose<br/>PoseStamped: MoveIt Path| ROBOT
+    MAIN -->|/robot/nudge_cmd<br/>String: HOME, SCAN, RECOVERY| ROBOT
+    MAIN -->|/robot/jog<br/>String: TURN_LEFT, STOP| ROBOT
+    MAIN -->|/robot/gripper<br/>String: close_tool, open| ROBOT
+
+    ROBOT -->|/robot/status<br/>String: arrived, fail: collision| MAIN
 
 ```
 ### Hardware Setup
