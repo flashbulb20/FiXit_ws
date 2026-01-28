@@ -10,6 +10,8 @@
 **Fixit**은 양손을 모두 사용하여 정밀한 PCB 수리 작업을 수행하는 엔지니어를 위한 **협동 로봇(Cobot) 솔루션**입니다.
 단순한 반복 작업이 아니라, **GPT-4o 기반의 자연어 이해**와 **Vision AI 기반의 의도 파악**을 통해 작업자와 실시간으로 소통하며 도구를 전달하거나 부품을 잡아줍니다.
 
+[🎬 데모 영상 보러가기](https://drive.google.com/file/d/1fMSeJ9ik8G-NQcmGhQ_8C3Ro81UqUoxY/view?usp=sharing)
+
 ### 🌟 Key Features
 🗣️ Natural Language Control (GPT-4o)
 
